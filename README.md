@@ -18,6 +18,32 @@ simply do:
     $ glide get github.com/moderepo/device-sdk-go
 
 
+## Using the SDK
+
+The default package name is `mode`. A trivial example:
+
+    package main
+
+    import (
+        "fmt"
+        "github.com/moderepo/device-sdk-go"
+    )
+
+    func main() {
+        dc := &mode.DeviceContext{
+            DeviceID:  __DEVICE_ID__,
+            AuthToken: "__DEVICE_TOKEN__",
+        }
+
+        if d, err := dc.GetInfo(); err == nil {
+            fmt.Printf("I am %v\n", d)
+        }
+    }
+
+
+See more examples [here](https://github.com/moderepo/device-sdk-go/blob/master/examples).
+
+
 ## Documentation
 
 See the full API documentation [here](https://godoc.org/github.com/moderepo/device-sdk-go).
