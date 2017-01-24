@@ -1,9 +1,8 @@
-package main
-
 /*
-In this example, the device sends an "echo" event whenever it receies a "doEcho"
+In this example, the device sends an "echo" event whenever it receives a "doEcho"
 command.
 */
+package main
 
 import (
 	"fmt"
