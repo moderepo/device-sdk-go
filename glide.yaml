@@ -1,0 +1,6 @@
+package: github.com/moderepo/device-sdk-go
+import:
+- package: github.com/gomqtt/packet
+  version: ~0.10.0
+- package: github.com/gorilla/websocket
+  version: ~1.0.0
