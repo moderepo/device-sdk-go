@@ -287,15 +287,12 @@ func (mc *mqttConn) runEventProcessor() {
 
 func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	var qos byte
-	var maxAttempts uint
 
 	switch e.qos {
 	case QOSAtMostOnce:
 		qos = packet.QOSAtMostOnce
-		maxAttempts = 1
 	case QOSAtLeastOnce:
 		qos = packet.QOSAtLeastOnce
-		maxAttempts = maxDeviceEventAttempts
 	default:
 		return errors.New("unsupported qos level")
 	}
@@ -310,27 +307,29 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 		Payload: payload,
 	}
 
-	for count := uint(1); count <= maxAttempts; count++ {
-		logInfo("[MQTT] event delivery attempt #%d", count)
+	for count := uint(1); count <= maxDeviceEventAttempts; count++ {
 		mc.outPacket <- p
 
-		if e.qos == QOSAtLeastOnce {
-			logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-			select {
-			case <-time.After(deviceEventRetryInterval):
-				logError("[MQTT] did not receive PUBACK packet within %v", deviceEventRetryInterval)
-
-			case ack := <-mc.puback:
-				if ack.PacketID == p.PacketID {
-					logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-					return nil
-				}
-				// TBD: Something is really wrong if packet ID does not match. What to do?
-			}
-
-			p.Dup = true
+		if e.qos == QOSAtMostOnce {
+			return nil
 		}
+
+		logInfo("[MQTT] event delivery attempt #%d for packet ID %d", count, p.PacketID)
+		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
+
+		select {
+		case <-time.After(deviceEventRetryInterval):
+			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, deviceEventRetryInterval)
+
+		case ack := <-mc.puback:
+			if ack.PacketID == p.PacketID {
+				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
+				return nil
+			}
+			// TBD: Something is really wrong if packet ID does not match. What to do?
+		}
+
+		p.Dup = true
 	}
 
 	return errors.New("event dropped")
