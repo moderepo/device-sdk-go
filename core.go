@@ -12,6 +12,7 @@ events already in the queue will be delivered when the connection resumes.
 package mode
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -219,6 +220,14 @@ func (cmd *DeviceCommand) String() string {
 	} else {
 		return fmt.Sprintf("{Action:\"%s\", Parameters:%s}", cmd.Action, string(cmd.payload))
 	}
+}
+
+// A special JSON decoder that makes sure numbers in command parameters
+// are preserved (avoid turning integers into floats).
+func decodeOpaqueJSON(b []byte, v interface{}) error {
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.UseNumber()
+	return decoder.Decode(v)
 }
 
 // BindParameters maps the command parameters from JSON to the provided struct.

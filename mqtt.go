@@ -20,11 +20,19 @@ const (
 var mqttDialer = &net.Dialer{Timeout: mqttConnectTimeout}
 
 type (
+	mqttMsgHandler func(*packet.PublishPacket) error
+
+	mqttSubscription struct {
+		topic      string
+		msgHandler mqttMsgHandler
+	}
+
 	mqttConn struct {
 		conn          net.Conn
 		stream        *packet.Stream
 		dc            *DeviceContext
 		packetID      uint16
+		subs          map[string]mqttSubscription
 		command       chan<- *DeviceCommand
 		event         <-chan *DeviceEvent
 		err           chan error
@@ -110,12 +118,12 @@ func (mc *mqttConn) connect() error {
 	return nil
 }
 
-func (mc *mqttConn) subscribe() error {
-	logInfo("[MQTT] subscribing to topic for device commands...")
+func (mc *mqttConn) subscribe(topic string, msgHandler mqttMsgHandler) error {
+	logInfo("[MQTT] subscribing to topic %s", topic)
 
 	subs := []packet.Subscription{
 		packet.Subscription{
-			Topic: fmt.Sprintf("/devices/%d/command", mc.dc.DeviceID),
+			Topic: topic,
 			QOS:   packet.QOSAtLeastOnce, // MODE only supports QoS0 for subscriptions
 		},
 	}
@@ -157,21 +165,22 @@ func (mc *mqttConn) subscribe() error {
 	}
 
 	logInfo("[MQTT] subscription succeeded with QOS %v", ack.ReturnCodes[0])
+	mc.subs[topic] = mqttSubscription{topic: topic, msgHandler: msgHandler}
 	return nil
 }
 
-func mqttParsePayload(p *packet.PublishPacket) (*DeviceCommand, error) {
+func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 	var cmd struct {
 		Action     string                 `json:"action"`
 		Parameters map[string]interface{} `json:"parameters"`
 	}
 
-	if err := json.Unmarshal(p.Message.Payload, &cmd); err != nil {
-		return nil, fmt.Errorf("message data is not valid command JSON: %s", err.Error())
+	if err := decodeOpaqueJSON(p.Message.Payload, &cmd); err != nil {
+		return fmt.Errorf("message data is not valid command JSON: %s", err.Error())
 	}
 
 	if cmd.Action == "" {
-		return nil, errors.New("message data is not valid command JSON: no action field")
+		return errors.New("message data is not valid command JSON: no action field")
 	}
 
 	// Re-encode parameters into JSON payload for later use.
@@ -180,7 +189,23 @@ func mqttParsePayload(p *packet.PublishPacket) (*DeviceCommand, error) {
 		payload, _ = json.Marshal(cmd.Parameters)
 	}
 
-	return &DeviceCommand{Action: cmd.Action, payload: payload}, nil
+	mc.command <- &DeviceCommand{Action: cmd.Action, payload: payload}
+	return nil
+}
+
+func (mc *mqttConn) handlePublishPacket(p *packet.PublishPacket) {
+	sub, exists := mc.subs[p.Message.Topic]
+	if !exists {
+		logError("[MQTT] received message for invalid topic %s", p.Message.Topic)
+		return
+	}
+
+	logInfo("[MQTT] received message for topic %s", p.Message.Topic)
+
+	if err := sub.msgHandler(p); err != nil {
+		logError("[MQTT] failed to process message: %s", err.Error())
+		return
+	}
 }
 
 func (mc *mqttConn) runPacketReader() {
@@ -201,11 +226,7 @@ func (mc *mqttConn) runPacketReader() {
 
 		switch p.Type() {
 		case packet.PUBLISH:
-			if cmd, err := mqttParsePayload(p.(*packet.PublishPacket)); err == nil {
-				mc.command <- cmd
-			} else {
-				logError("[MQTT] received invalid command: %s", err.Error())
-			}
+			mc.handlePublishPacket(p.(*packet.PublishPacket))
 
 		case packet.PUBACK:
 			mc.puback <- p.(*packet.PubackPacket)
@@ -336,7 +357,10 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 }
 
 func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent) (*mqttConn, error) {
-	mc := &mqttConn{dc: dc}
+	mc := &mqttConn{
+		dc:   dc,
+		subs: make(map[string]mqttSubscription),
+	}
 
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
 
@@ -363,7 +387,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 		return nil, err
 	}
 
-	if err := mc.subscribe(); err != nil {
+	if err := mc.subscribe(fmt.Sprintf("/devices/%d/command", mc.dc.DeviceID), mc.handleCommandMsg); err != nil {
 		mc.conn.Close()
 		return nil, err
 	}
