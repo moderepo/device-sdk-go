@@ -45,7 +45,7 @@ func wsParseMessage(msgType int, data []byte) (*DeviceCommand, error) {
 		Parameters map[string]interface{} `json:"parameters"`
 	}
 
-	if err := json.Unmarshal(data, &cmd); err != nil {
+	if err := decodeOpaqueJSON(data, &cmd); err != nil {
 		return nil, fmt.Errorf("message data is not valid command JSON: %s", err.Error())
 	}
 
