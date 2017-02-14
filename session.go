@@ -147,34 +147,38 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 	sessPingTimeout = timeout
 }
 
-func newSession(dc *DeviceContext, useMQTT bool) (*session, error) {
-	cmdQueue := make(chan *DeviceCommand, commandQueueLength)
-	evtQueue := make(chan *DeviceEvent, eventQueueLength)
+func initSession(dc *DeviceContext, useMQTT bool) error {
+	sess = &session{
+		dc:        dc,
+		usingMQTT: useMQTT,
+		cmdQueue:  make(chan *DeviceCommand, commandQueueLength),
+		evtQueue:  make(chan *DeviceEvent, eventQueueLength),
+	}
 
 	var conn connection
 	var err error
 
 	if useMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(cmdQueue, evtQueue)
+		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
-		conn, err = dc.openWebsocket(cmdQueue, evtQueue)
+		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
 	}
 
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	s := &session{
-		dc:        dc,
-		usingMQTT: useMQTT,
-		conn:      conn,
-		cmdQueue:  cmdQueue,
-		evtQueue:  evtQueue,
-	}
+	sess.conn = conn
+	return nil
+}
 
-	return s, nil
+func terminateSession() {
+	if sess != nil {
+		sess.terminate()
+		sess = nil
+	}
 }
 
 func (s *session) terminate() {
@@ -249,11 +253,11 @@ func sessionIdleLoop() {
 	for {
 		select {
 		case c := <-sessCtrl.start:
-			if s, err := newSession(c.dc, c.useMQTT); err == nil {
-				sess = s
+			if err := initSession(c.dc, c.useMQTT); err == nil {
 				sess.startCommandProcessor()
 				sessState = SessionActive
 			} else {
+				logError("[SessionManager] session not started: %s", err.Error())
 				sessState = SessionRecovering
 			}
 
@@ -282,8 +286,7 @@ func sessionActiveLoop() {
 			c.response <- ErrorSessionAlreadyStarted
 
 		case c := <-sessCtrl.stop:
-			sess.terminate()
-			sess = nil
+			terminateSession()
 			sessState = SessionIdle
 			c.response <- nil
 			return
@@ -340,8 +343,7 @@ func sessionRecoveringLoop() {
 			c.response <- ErrorSessionAlreadyStarted
 
 		case c := <-sessCtrl.stop:
-			sess.terminate()
-			sess = nil
+			terminateSession()
 			sessState = SessionIdle
 			c.response <- nil
 			return
