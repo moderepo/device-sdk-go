@@ -1,6 +1,6 @@
 # MODE Device SDK for Go
 
-This SDK is for anyone implement MODE device drivers using the Go language. It is
+This SDK is for anyone implementing MODE device drivers in the Go language. It is
 being released as a public Go package that provides a Go API for devices to interact with the MODE cloud.
 
 
