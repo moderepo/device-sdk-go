@@ -75,7 +75,7 @@ var (
 		stop      chan *sessCtrlStop
 		getState  chan *sessCtrlGetState
 		sendEvent chan *sessCtrlSendEvent
-		ping      chan bool
+		ping      <-chan time.Time
 	}
 
 	sess *session
@@ -98,17 +98,9 @@ func init() {
 	sessCtrl.stop = make(chan *sessCtrlStop, 1)
 	sessCtrl.getState = make(chan *sessCtrlGetState, 1)
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
-	sessCtrl.ping = make(chan bool) // we want this to block
+	sessCtrl.ping = time.Tick(sessPingInterval)
 
 	go runSessionManager()
-
-	// Start timer for pings.
-	go func() {
-		for {
-			time.Sleep(sessPingInterval)
-			sessCtrl.ping <- true
-		}
-	}()
 }
 
 // SetCommandHandler assigns a function to handle device commands
