@@ -1,5 +1,7 @@
 # MODE Device SDK for Go
 
+[![GoDoc](https://godoc.org/github.com/moderepo/device-sdk-go?status.svg)](https://godoc.org/github.com/moderepo/device-sdk-go)
+
 This SDK is for anyone implementing MODE device drivers in the Go language. It is
 being released as a public Go package that provides a Go API for devices to interact with the MODE cloud.
 
