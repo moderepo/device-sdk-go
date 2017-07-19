@@ -52,12 +52,15 @@ var (
 	infoLogger  = log.New(os.Stdout, "[MODE - INFO] ", log.LstdFlags)
 	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
 
-	maxDeviceEventAttempts   uint = 3
-	deviceEventRetryInterval      = time.Second * 5
+	maxDeviceEventAttempts      uint = 3
+	maxDeviceKeyValueAttempts   uint = 3
+	deviceEventRetryInterval         = time.Second * 5
+	deviceKeyValueRetryInterval      = time.Second * 5
 
 	// TBD: how much buffering should we allow?
-	eventQueueLength   = 128
-	commandQueueLength = 128
+	eventQueueLength    = 128
+	keyValueQueueLength = 128
+	commandQueueLength  = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies
@@ -132,6 +135,11 @@ type (
 		EventType string                 `json:"eventType"`
 		EventData map[string]interface{} `json:"eventData,omitempty"`
 		qos       QOSLevel               // not exported to JSON
+	}
+
+	DeviceKeyValue struct {
+		Key   string                 `json:"key"`
+		Value map[string]interface{} `json:"value"`
 	}
 
 	// A callback function that handles a device command.

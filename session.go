@@ -20,6 +20,7 @@ type (
 		conn      connection
 		cmdQueue  chan *DeviceCommand
 		evtQueue  chan *DeviceEvent
+		kvQueue   chan *DeviceKeyValue
 	}
 
 	sessCtrlStart struct {
@@ -38,6 +39,11 @@ type (
 
 	sessCtrlSendEvent struct {
 		event    *DeviceEvent
+		response chan error
+	}
+
+	sessCtrlSetKeyValue struct {
+		keyValue *DeviceKeyValue
 		response chan error
 	}
 
@@ -71,11 +77,12 @@ var (
 	sessState = SessionIdle
 
 	sessCtrl struct {
-		start     chan *sessCtrlStart
-		stop      chan *sessCtrlStop
-		getState  chan *sessCtrlGetState
-		sendEvent chan *sessCtrlSendEvent
-		ping      <-chan time.Time
+		start       chan *sessCtrlStart
+		stop        chan *sessCtrlStop
+		getState    chan *sessCtrlGetState
+		sendEvent   chan *sessCtrlSendEvent
+		setKeyValue chan *sessCtrlSetKeyValue
+		ping        <-chan time.Time
 	}
 
 	sess *session
@@ -98,6 +105,7 @@ func init() {
 	sessCtrl.stop = make(chan *sessCtrlStop, 1)
 	sessCtrl.getState = make(chan *sessCtrlGetState, 1)
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
+	sessCtrl.setKeyValue = make(chan *sessCtrlSetKeyValue, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
 	go runSessionManager()
@@ -145,6 +153,7 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 		usingMQTT: useMQTT,
 		cmdQueue:  make(chan *DeviceCommand, commandQueueLength),
 		evtQueue:  make(chan *DeviceEvent, eventQueueLength),
+		kvQueue:   make(chan *DeviceKeyValue, eventQueueLength),
 	}
 
 	var conn connection
@@ -152,7 +161,7 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 
 	if useMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue)
+		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
@@ -185,6 +194,11 @@ func (s *session) terminate() {
 		close(s.evtQueue)
 		s.evtQueue = nil
 	}
+
+	if s.kvQueue != nil {
+		close(s.kvQueue)
+		s.kvQueue = nil
+	}
 }
 
 func (s *session) disconnect() {
@@ -195,6 +209,10 @@ func (s *session) disconnect() {
 
 	if n := len(s.evtQueue); n > 0 {
 		logInfo("[Session] pending events in queue: %d", n)
+	}
+
+	if n := len(s.kvQueue); n > 0 {
+		logInfo("[Session] pending key value set in queue: %d", n)
 	}
 }
 
@@ -208,7 +226,7 @@ func (s *session) reconnect() error {
 
 	if s.usingMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue)
+		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = s.dc.openWebsocket(s.cmdQueue, s.evtQueue)
@@ -264,6 +282,9 @@ func sessionIdleLoop() {
 
 		case c := <-sessCtrl.sendEvent:
 			c.response <- ErrorSessionNotStarted
+
+		case c := <-sessCtrl.setKeyValue:
+			c.response <- ErrorSessionNotStarted
 		}
 	}
 }
@@ -294,6 +315,10 @@ func sessionActiveLoop() {
 
 		case c := <-sessCtrl.sendEvent:
 			sess.evtQueue <- c.event
+			c.response <- nil
+
+		case c := <-sessCtrl.setKeyValue:
+			sess.kvQueue <- c.keyValue
 			c.response <- nil
 
 		case <-sessCtrl.ping:
@@ -418,6 +443,16 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 	}
 
 	sessCtrl.sendEvent <- ctrl
+	return <-ctrl.response
+}
+
+func SetKeyValue(key string, value map[string]interface{}) error {
+	ctrl := &sessCtrlSetKeyValue{
+		keyValue: &DeviceKeyValue{Key: key, Value: value},
+		response: make(chan error, 1),
+	}
+
+	sessCtrl.setKeyValue <- ctrl
 	return <-ctrl.response
 }
 

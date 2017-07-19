@@ -35,6 +35,7 @@ type (
 		subs          map[string]mqttSubscription
 		command       chan<- *DeviceCommand
 		event         <-chan *DeviceEvent
+		keyValue      <-chan *DeviceKeyValue
 		err           chan error
 		doPing        chan time.Duration
 		outPacket     chan packet.Packet
@@ -284,7 +285,7 @@ func (mc *mqttConn) runPinger() {
 	}
 }
 
-func (mc *mqttConn) runEventProcessor() {
+func (mc *mqttConn) runUpstreamProcessor() {
 	logInfo("[MQTT] event processor is running")
 	mc.wgWrite.Add(1)
 
@@ -301,6 +302,10 @@ func (mc *mqttConn) runEventProcessor() {
 		case e := <-mc.event:
 			if err := mc.sendEvent(e); err != nil {
 				logError("[MQTT] failed to send event: %s", err.Error())
+			}
+		case kv := <-mc.keyValue:
+			if err := mc.setKeyValue(kv); err != nil {
+				logError("[MQTT] failed to set keyValue: %s", err.Error())
 			}
 		}
 	}
@@ -356,7 +361,51 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent) (*mqttConn, error) {
+func (mc *mqttConn) setKeyValue(kv *DeviceKeyValue) error {
+	fmt.Println("11====")
+	// Should be QoS2?
+	qos := packet.QOSAtLeastOnce
+	fmt.Printf("2==== %v\n", kv)
+	fmt.Printf("2==== %v\n", kv.Value)
+
+	payload, _ := json.Marshal(kv.Value)
+	fmt.Println("1===")
+
+	p := packet.NewPublishPacket()
+	p.PacketID = mc.getPacketID()
+	fmt.Println("1====")
+	p.Message = packet.Message{
+		Topic:   fmt.Sprintf("/devices/%d/kv/%s", mc.dc.DeviceID, kv.Key),
+		QOS:     qos,
+		Payload: payload,
+	}
+
+	fmt.Println("====")
+	for count := uint(1); count <= maxDeviceKeyValueAttempts; count++ {
+		mc.outPacket <- p
+
+		logInfo("[MQTT] key value delivery attempt #%d for packet ID %d", count, p.PacketID)
+		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
+
+		select {
+		case <-time.After(deviceKeyValueRetryInterval):
+			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, deviceKeyValueRetryInterval)
+
+		case ack := <-mc.puback:
+			if ack.PacketID == p.PacketID {
+				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
+				return nil
+			}
+			// TBD: Something is really wrong if packet ID does not match. What to do?
+		}
+
+		p.Dup = true
+	}
+
+	return errors.New("keyValue dropped")
+}
+
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvQueue <-chan *DeviceKeyValue) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -394,6 +443,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 
 	mc.command = cmdQueue
 	mc.event = evtQueue
+	mc.keyValue = kvQueue
 	mc.doPing = make(chan time.Duration, 1)
 	mc.stopEventProc = make(chan bool)
 	mc.err = make(chan error, 10) // make sure this won't block
@@ -403,7 +453,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 
 	go mc.runPacketReader()
 	go mc.runPacketWriter()
-	go mc.runEventProcessor()
+	go mc.runUpstreamProcessor()
 	go mc.runPinger()
 
 	return mc, nil
