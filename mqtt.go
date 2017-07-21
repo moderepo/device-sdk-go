@@ -362,25 +362,27 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 }
 
 func (mc *mqttConn) setKeyValue(kv *DeviceKeyValue) error {
-	fmt.Println("11====")
-	// Should be QoS2?
 	qos := packet.QOSAtLeastOnce
-	fmt.Printf("2==== %v\n", kv)
-	fmt.Printf("2==== %v\n", kv.Value)
 
-	payload, _ := json.Marshal(kv.Value)
-	fmt.Println("1===")
+	var _kv struct {
+		Action string                 `json:"action"`
+		Key    string                 `json:"key"`
+		Value  map[string]interface{} `json:"value"`
+	}
+	_kv.Action = "set"
+	_kv.Key = kv.Key
+	_kv.Value = kv.Value
+
+	payload, _ := json.Marshal(_kv)
 
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
-	fmt.Println("1====")
 	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/kv/%s", mc.dc.DeviceID, kv.Key),
+		Topic:   fmt.Sprintf("/devices/%d/kv", mc.dc.DeviceID),
 		QOS:     qos,
 		Payload: payload,
 	}
 
-	fmt.Println("====")
 	for count := uint(1); count <= maxDeviceKeyValueAttempts; count++ {
 		mc.outPacket <- p
 
