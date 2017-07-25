@@ -283,25 +283,36 @@ func (s *session) startCommandProcessor() {
 func (s *session) kvReload(rev int, items []interface{}) bool {
 	logInfo("[Session] Rev %d number of Items: %d", rev, len(items))
 
-	// Clear kvStore
-	kvStore = map[string]*KeyValue{}
+	newKvStore := map[string]*KeyValue{}
 
 	for _, i := range items {
-		// TODO: Fix better casting
 		item := i.(map[string]interface{})
-		key := item["key"].(string)
-		value := item["value"].(map[string]interface{})
-		mtime, _ := time.Parse(time.RFC3339Nano, item["modificationTime"].(string))
+		key, ok := item["key"].(string)
+		if !ok {
+			logError("[Session] Failed to get key")
+			return false
+		}
+		value, ok := item["value"].(map[string]interface{})
+		if !ok {
+			logError("[Session] Failed to get value")
+			return false
+		}
+		mtime, err := time.Parse(time.RFC3339Nano, item["modificationTime"].(string))
+		if err != nil {
+			logError("[Session] Failed to parse modificationTime")
+			return false
+		}
 		kv := &KeyValue{Rev: rev, Value: value, MTime: mtime}
-		kvStore[key] = kv
+		newKvStore[key] = kv
 		logInfo("[Session] key: %s", key)
 	}
+
+	kvStore = newKvStore
 
 	return true
 }
 
 func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool {
-	// TODO: Need mtime?
 	if len(key) == 0 {
 		logError("[Session] Invalid Key")
 		return false
