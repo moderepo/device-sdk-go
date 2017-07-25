@@ -143,6 +143,7 @@ type (
 		Value  map[string]interface{} `json:"value"`
 		Rev    int                    `json:"rev"`
 		Items  []interface{}          `json:"items"`
+		MTime  time.Time              `json:"mtime"`
 	}
 
 	// A callback function that handles a device command.

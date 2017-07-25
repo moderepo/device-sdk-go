@@ -291,9 +291,9 @@ func (s *session) kvReload(rev int, items []interface{}) bool {
 		item := i.(map[string]interface{})
 		key := item["key"].(string)
 		value := item["value"].(map[string]interface{})
-		kv := &ActionKeyValue{Rev: rev, Value: value}
+		mtime, _ := time.Parse(time.RFC3339Nano, item["modificationTime"].(string))
+		kv := &ActionKeyValue{Rev: rev, Value: value, MTime: mtime}
 		kvStore[key] = kv
-		// TODO: Need mtime?
 		logInfo("[Session] key: %s", key)
 	}
 
@@ -314,7 +314,7 @@ func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool 
 
 	stored, ok := kvStore[key]
 	if !ok {
-		kvStore[key] = &ActionKeyValue{Rev: rev, Value: value}
+		kvStore[key] = &ActionKeyValue{Rev: rev, Value: value, MTime: time.Now()}
 		logInfo("[Session] kvSet saved new key %s", key)
 		return true
 	}
@@ -326,6 +326,7 @@ func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool 
 
 	stored.Rev = rev
 	stored.Value = value
+	stored.MTime = time.Now()
 	logInfo("[Session] kvSet updated value of key %s", key)
 
 	return true
@@ -341,7 +342,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 	if !ok {
 		// This can happen if SET and DELETE transactions are out of order.
 		// Record the delete anyway.
-		kvStore[key] = &ActionKeyValue{Rev: rev}
+		kvStore[key] = &ActionKeyValue{Rev: rev, MTime: time.Now()}
 
 		logInfo("[Session] kvDelete deleted value for key '%s'", key)
 		return true
@@ -354,6 +355,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 
 	stored.Rev = rev
 	stored.Value = nil
+	stored.MTime = time.Now()
 	logInfo("[Session] kvDelete deleted value for key %s", key)
 	return true
 }
