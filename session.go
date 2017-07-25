@@ -49,8 +49,9 @@ type (
 	}
 
 	sessCtrlRecvKeyValue struct {
+		all        bool
 		key        string
-		responseKv chan *KeyValue
+		responseKv chan []*KeyValue
 	}
 
 	// SessionState represents a state of the device's connection session.
@@ -417,10 +418,20 @@ func (s *session) startKeyValueProcessor() {
 				s.keyValueHandler(s.dc, kv)
 
 			case r := <-sessCtrl.recvKeyValue:
-				if kv, ok := kvStore[r.key]; ok {
-					r.responseKv <- &KeyValue{Key: kv.Key, Value: kv.Value, Rev: kv.Rev, MTime: kv.MTime}
+				if r.all {
+
+					kvs := []*KeyValue{}
+					for k, v := range kvStore {
+						kvs = append(kvs, &KeyValue{Key: k, Value: v.Value, MTime: v.MTime})
+					}
+					r.responseKv <- kvs
+
 				} else {
-					r.responseKv <- nil
+					if kv, ok := kvStore[r.key]; ok {
+						r.responseKv <- []*KeyValue{&KeyValue{Key: kv.Key, Value: kv.Value, Rev: kv.Rev, MTime: kv.MTime}}
+					} else {
+						r.responseKv <- nil
+					}
 				}
 			}
 		}
@@ -628,17 +639,31 @@ func SetKeyValue(key string, value map[string]interface{}) error {
 	return <-ctrl.response
 }
 
-func GetKeyValue(key string) (map[string]interface{}, bool) {
+func GetKeyValue(key string) (*KeyValue, bool) {
 	ctrl := &sessCtrlRecvKeyValue{
 		key:        key,
-		responseKv: make(chan *KeyValue, 1),
+		responseKv: make(chan ([]*KeyValue), 1),
 	}
 
 	sessCtrl.recvKeyValue <- ctrl
 	if r := <-ctrl.responseKv; r == nil {
 		return nil, false
 	} else {
-		return r.Value, true
+		return r[0], true
+	}
+}
+
+func GetAllKeyValues(key string) []*KeyValue {
+	ctrl := &sessCtrlRecvKeyValue{
+		key:        key,
+		responseKv: make(chan []*KeyValue, 1),
+	}
+
+	sessCtrl.recvKeyValue <- ctrl
+	if r := <-ctrl.responseKv; r == nil {
+		return nil
+	} else {
+		return r
 	}
 }
 
