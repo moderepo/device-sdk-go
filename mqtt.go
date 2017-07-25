@@ -45,6 +45,12 @@ type (
 		wgWrite       sync.WaitGroup
 		wgRead        sync.WaitGroup
 	}
+
+	actionKeyValue struct {
+		Action string                 `json:"action"`
+		Key    string                 `json:"key"`
+		Value  map[string]interface{} `json:"value"`
+	}
 )
 
 func (mc *mqttConn) close() {
@@ -361,20 +367,16 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
-func (mc *mqttConn) setKeyValue(kv *DeviceKeyValue) error {
+func (mc *mqttConn) setKeyValue(dkv *DeviceKeyValue) error {
 	qos := packet.QOSAtLeastOnce
 
-	var _kv struct {
-		Action string                 `json:"action"`
-		Key    string                 `json:"key"`
-		Value  map[string]interface{} `json:"value"`
+	kv := actionKeyValue{
+		"set",
+		kv.Key,
+		kv.Value,
 	}
-	_kv.Action = "set"
-	_kv.Key = kv.Key
-	_kv.Value = kv.Value
 
-	payload, _ := json.Marshal(_kv)
-
+	payload, _ := json.Marshal(kv)
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
 	p.Message = packet.Message{
