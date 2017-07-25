@@ -147,6 +147,10 @@ type (
 
 	// A callback function that handles a device command.
 	CommandHandler func(*DeviceContext, *DeviceCommand)
+
+	KvReloadHandler func(items []map[string]interface{}) bool
+	KvSetHandler    func(key string, value map[string]interface{}) bool
+	KvDeleteHandler func(key string) bool
 )
 
 // ProvisionDevice is used for on-demand device provisioning. It takes a

@@ -100,7 +100,10 @@ var (
 	sessPingInterval = sessDefaultPingInterval
 	sessPingTimeout  = sessDefaultPingTimeout
 
-	kvStore = map[string]*ActionKeyValue{}
+	kvReloadHandler KvReloadHandler
+	kvSetHandler    KvSetHandler
+	kvDeleteHandler KvDeleteHandler
+	kvStore         = map[string]*ActionKeyValue{}
 )
 
 func init() {
@@ -139,6 +142,18 @@ func SetDefaultCommandHandler(h CommandHandler) {
 // the device's connection session changes state.
 func SetSessionStateCallback(f SessionStateCallback) {
 	sessStateCallback = f
+}
+
+func SetKvReloadHandler(h KvReloadHandler) {
+	kvReloadHandler = h
+}
+
+func SetKvSetHandler(h KvSetHandler) {
+	kvSetHandler = h
+}
+
+func SetKvDeleteHandler(h KvDeleteHandler) {
+	kvDeleteHandler = h
 }
 
 // When the device's connection session is in the "active" state, "pings"
@@ -275,10 +290,6 @@ func (s *session) kvReload(rev int, items []interface{}) bool {
 		// TODO: Fix better casting
 		item := i.(map[string]interface{})
 		key := item["key"].(string)
-		if len(key) == 0 {
-			logError("[Session] Invalid Key")
-			return false
-		}
 		value := item["value"].(map[string]interface{})
 		kv := &ActionKeyValue{Rev: rev, Value: value}
 		kvStore[key] = kv
@@ -351,11 +362,21 @@ func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
 
 	switch kv.Action {
 	case "reload":
-		s.kvReload(kv.Rev, kv.Items)
+		if s.kvReload(kv.Rev, kv.Items) && kvReloadHandler != nil {
+			items := []map[string]interface{}{}
+			for _, item := range kv.Items {
+				items = append(items, item.(map[string]interface{}))
+			}
+			kvReloadHandler(items)
+		}
 	case "set":
-		s.kvSet(kv.Rev, kv.Key, kv.Value)
+		if s.kvSet(kv.Rev, kv.Key, kv.Value) && kvSetHandler != nil {
+			kvSetHandler(kv.Key, kv.Value)
+		}
 	case "delete":
-		s.kvDelete(kv.Rev, kv.Key)
+		if s.kvDelete(kv.Rev, kv.Key) && kvDeleteHandler != nil {
+			kvDeleteHandler(kv.Key)
+		}
 
 	default:
 		logError("[Session] received sync message with unknown action %s", kv.Action)
