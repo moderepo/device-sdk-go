@@ -639,6 +639,14 @@ func SetKeyValue(key string, value map[string]interface{}) error {
 	return <-ctrl.response
 }
 
+/*
+  TODO
+  GetKeyValue and GetAllKeyValues APIs are half baked.
+	Do not use them yet.
+	Currently startKeyValueProcess() goroutine loop life span is tied to MQTT connection.
+	So the channel request may be stuck while instable connection.
+	Need to change the lifespan to the same as session goroutine lifespan.
+
 func GetKeyValue(key string) (*KeyValue, bool) {
 	ctrl := &sessCtrlRecvKeyValue{
 		key:      key,
@@ -666,6 +674,8 @@ func GetAllKeyValues() []*KeyValue {
 		return ctrl.responseKv
 	}
 }
+
+*/
 
 func DeleteKeyValue(key string, value map[string]interface{}) error {
 	ctrl := &sessCtrlSendKeyValue{
