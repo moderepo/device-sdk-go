@@ -448,7 +448,17 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 
 func SetKeyValue(key string, value map[string]interface{}) error {
 	ctrl := &sessCtrlSetKeyValue{
-		keyValue: &ActionKeyValue{Key: key, Value: value},
+		keyValue: &ActionKeyValue{Action: "set", Key: key, Value: value},
+		response: make(chan error, 1),
+	}
+
+	sessCtrl.setKeyValue <- ctrl
+	return <-ctrl.response
+}
+
+func DeleteKeyValue(key string, value map[string]interface{}) error {
+	ctrl := &sessCtrlSetKeyValue{
+		keyValue: &ActionKeyValue{Action: "delete", Key: key, Value: value},
 		response: make(chan error, 1),
 	}
 

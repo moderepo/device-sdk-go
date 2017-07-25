@@ -21,7 +21,7 @@ func main() {
 	initDevice()
 
 	time.Sleep(3 * time.Second)
-	mode.SetKeyValue("hoge", map[string]interface{}{"a": 1})
+	mode.DeleteKeyValue("hoge", map[string]interface{}{"a": 1})
 	fmt.Println("vim-go")
 	time.Sleep(3 * time.Second)
 }
