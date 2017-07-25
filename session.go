@@ -266,7 +266,7 @@ func (s *session) startCommandProcessor() {
 }
 
 func (s *session) kvReload(rev int, items []interface{}) bool {
-	logInfo("Rev %d number of Items: %d", rev, len(items))
+	logInfo("[Session] Rev %d number of Items: %d", rev, len(items))
 
 	// Clear kvStore
 	kvStore = map[string]*ActionKeyValue{}
@@ -275,13 +275,75 @@ func (s *session) kvReload(rev int, items []interface{}) bool {
 		// TODO: Fix better casting
 		item := i.(map[string]interface{})
 		key := item["key"].(string)
+		if len(key) == 0 {
+			logError("[Session] Invalid Key")
+			return false
+		}
 		value := item["value"].(map[string]interface{})
 		kv := &ActionKeyValue{Rev: rev, Value: value}
 		kvStore[key] = kv
 		// TODO: Need mtime?
-		logInfo("key: %s", key)
+		logInfo("[Session] key: %s", key)
 	}
 
+	return true
+}
+
+func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool {
+	// TODO: Need mtime?
+	if len(key) == 0 {
+		logError("[Session] Invalid Key")
+		return false
+	}
+
+	if value == nil {
+		logError("[Session] Invalid value")
+		return false
+	}
+
+	stored, ok := kvStore[key]
+	if !ok {
+		kvStore[key] = &ActionKeyValue{Rev: rev, Value: value}
+		logInfo("[Session] kvSet saved new key %s", key)
+		return true
+	}
+
+	if rev <= stored.Rev {
+		logInfo("[Session] kvSet ignored obsolete update (rev %d) to key %s (rev %d)", key, rev, stored.Rev)
+		return false
+	}
+
+	stored.Rev = rev
+	stored.Value = value
+	logInfo("[Session] kvSet updated value of key %s", key)
+
+	return true
+}
+
+func (s *session) kvDelete(rev int, key string) bool {
+	if len(key) == 0 {
+		logError("[Session] Invalid Key")
+		return false
+	}
+
+	stored, ok := kvStore[key]
+	if !ok {
+		// This can happen if SET and DELETE transactions are out of order.
+		// Record the delete anyway.
+		kvStore[key] = &ActionKeyValue{Rev: rev}
+
+		logInfo("[Session] kvDelete deleted value for key '%s'", key)
+		return true
+	}
+
+	if rev <= stored.Rev {
+		logInfo("[Session] kvDelete ignored obsolete update (rev %d) to key %s (rev %d)", key, rev, stored.Rev)
+		return false
+	}
+
+	stored.Rev = rev
+	stored.Value = nil
+	logInfo("[Session] kvDelete deleted value for key %s", key)
 	return true
 }
 
@@ -291,7 +353,9 @@ func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
 	case "reload":
 		s.kvReload(kv.Rev, kv.Items)
 	case "set":
+		s.kvSet(kv.Rev, kv.Key, kv.Value)
 	case "delete":
+		s.kvDelete(kv.Rev, kv.Key)
 
 	default:
 		logError("[Session] received sync message with unknown action %s", kv.Action)
