@@ -653,9 +653,9 @@ func GetKeyValue(key string) (*KeyValue, bool) {
 	}
 }
 
-func GetAllKeyValues(key string) []*KeyValue {
+func GetAllKeyValues() []*KeyValue {
 	ctrl := &sessCtrlRecvKeyValue{
-		key:        key,
+		all:        true,
 		responseKv: make(chan []*KeyValue, 1),
 	}
 
