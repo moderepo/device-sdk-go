@@ -195,11 +195,7 @@ func (dc *DeviceContext) EnableClaimMode(duration time.Duration) error {
 	params.Claimable = true
 	params.Duration = uint64(duration / time.Second)
 
-	if err := makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil); err != nil {
-		return err
-	}
-
-	return nil
+	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
 }
 
 // DisableClaimMode turns off the device's "claim mode", disallowing it to be added
@@ -213,11 +209,7 @@ func (dc *DeviceContext) DisableClaimMode() error {
 	params.DeviceID = dc.DeviceID
 	params.Claimable = false
 
-	if err := makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil); err != nil {
-		return err
-	}
-
-	return nil
+	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
 }
 
 // GetInfo fetches the device's information from MODE.
