@@ -35,8 +35,8 @@ type (
 		subs          map[string]mqttSubscription
 		command       chan<- *DeviceCommand
 		event         <-chan *DeviceEvent
-		recvKeyValue  chan<- *ActionKeyValue
-		keyValue      <-chan *ActionKeyValue
+		recvKeyValue  chan<- *KeyValue
+		sendKeyValue  <-chan *KeyValue
 		err           chan error
 		doPing        chan time.Duration
 		outPacket     chan packet.Packet
@@ -196,7 +196,7 @@ func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 }
 
 func (mc *mqttConn) handleKeyValueMsg(p *packet.PublishPacket) error {
-	var kv ActionKeyValue
+	var kv KeyValue
 	if err := decodeOpaqueJSON(p.Message.Payload, &kv); err != nil {
 		return fmt.Errorf("message data is not valid key value JSON: %s", err.Error())
 	}
@@ -318,7 +318,7 @@ func (mc *mqttConn) runUpstreamProcessor() {
 			if err := mc.sendEvent(e); err != nil {
 				logError("[MQTT] failed to send event: %s", err.Error())
 			}
-		case kv := <-mc.keyValue:
+		case kv := <-mc.sendKeyValue:
 			if err := mc.setKeyValue(kv); err != nil {
 				logError("[MQTT] failed to set keyValue: %s", err.Error())
 			}
@@ -376,10 +376,11 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
-func (mc *mqttConn) setKeyValue(akv *ActionKeyValue) error {
+func (mc *mqttConn) setKeyValue(kv *KeyValue) error {
+	// Always QoS1
 	qos := packet.QOSAtLeastOnce
 
-	payload, _ := json.Marshal(akv)
+	payload, _ := json.Marshal(kv)
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
 	p.Message = packet.Message{
@@ -412,7 +413,7 @@ func (mc *mqttConn) setKeyValue(akv *ActionKeyValue) error {
 	return errors.New("keyValue dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, recvKvQueue chan<- *ActionKeyValue, kvQueue <-chan *ActionKeyValue) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, recvKvQueue chan<- *KeyValue, kvQueue <-chan *KeyValue) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -456,7 +457,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	mc.command = cmdQueue
 	mc.event = evtQueue
 	mc.recvKeyValue = recvKvQueue
-	mc.keyValue = kvQueue
+	mc.sendKeyValue = kvQueue
 	mc.doPing = make(chan time.Duration, 1)
 	mc.stopEventProc = make(chan bool)
 	mc.err = make(chan error, 10) // make sure this won't block

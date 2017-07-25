@@ -20,8 +20,8 @@ type (
 		conn        connection
 		cmdQueue    chan *DeviceCommand
 		evtQueue    chan *DeviceEvent
-		kvQueue     chan *ActionKeyValue
-		recvKvQueue chan *ActionKeyValue
+		sendKvQueue chan *KeyValue
+		recvKvQueue chan *KeyValue
 	}
 
 	sessCtrlStart struct {
@@ -43,8 +43,8 @@ type (
 		response chan error
 	}
 
-	sessCtrlSetKeyValue struct {
-		keyValue *ActionKeyValue
+	sessCtrlSendKeyValue struct {
+		keyValue *KeyValue
 		response chan error
 	}
 
@@ -78,12 +78,12 @@ var (
 	sessState = SessionIdle
 
 	sessCtrl struct {
-		start       chan *sessCtrlStart
-		stop        chan *sessCtrlStop
-		getState    chan *sessCtrlGetState
-		sendEvent   chan *sessCtrlSendEvent
-		setKeyValue chan *sessCtrlSetKeyValue
-		ping        <-chan time.Time
+		start        chan *sessCtrlStart
+		stop         chan *sessCtrlStop
+		getState     chan *sessCtrlGetState
+		sendEvent    chan *sessCtrlSendEvent
+		sendKeyValue chan *sessCtrlSendKeyValue
+		ping         <-chan time.Time
 	}
 
 	sess *session
@@ -103,7 +103,7 @@ var (
 	kvReloadHandler KvReloadHandler
 	kvSetHandler    KvSetHandler
 	kvDeleteHandler KvDeleteHandler
-	kvStore         = map[string]*ActionKeyValue{}
+	kvStore         = map[string]*KeyValue{}
 )
 
 func init() {
@@ -111,7 +111,7 @@ func init() {
 	sessCtrl.stop = make(chan *sessCtrlStop, 1)
 	sessCtrl.getState = make(chan *sessCtrlGetState, 1)
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
-	sessCtrl.setKeyValue = make(chan *sessCtrlSetKeyValue, 1)
+	sessCtrl.sendKeyValue = make(chan *sessCtrlSendKeyValue, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
 	go runSessionManager()
@@ -171,8 +171,8 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 		usingMQTT:   useMQTT,
 		cmdQueue:    make(chan *DeviceCommand, commandQueueLength),
 		evtQueue:    make(chan *DeviceEvent, eventQueueLength),
-		kvQueue:     make(chan *ActionKeyValue, eventQueueLength),
-		recvKvQueue: make(chan *ActionKeyValue, eventQueueLength),
+		sendKvQueue: make(chan *KeyValue, eventQueueLength),
+		recvKvQueue: make(chan *KeyValue, eventQueueLength),
 	}
 
 	var conn connection
@@ -180,7 +180,7 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 
 	if useMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.recvKvQueue, sess.kvQueue)
+		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.recvKvQueue, sess.sendKvQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
@@ -214,9 +214,9 @@ func (s *session) terminate() {
 		s.evtQueue = nil
 	}
 
-	if s.kvQueue != nil {
-		close(s.kvQueue)
-		s.kvQueue = nil
+	if s.sendKvQueue != nil {
+		close(s.sendKvQueue)
+		s.sendKvQueue = nil
 	}
 
 	if s.recvKvQueue != nil {
@@ -235,7 +235,7 @@ func (s *session) disconnect() {
 		logInfo("[Session] pending events in queue: %d", n)
 	}
 
-	if n := len(s.kvQueue); n > 0 {
+	if n := len(s.sendKvQueue); n > 0 {
 		logInfo("[Session] pending key value set in queue: %d", n)
 	}
 }
@@ -250,7 +250,7 @@ func (s *session) reconnect() error {
 
 	if s.usingMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.recvKvQueue, s.kvQueue)
+		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.recvKvQueue, s.sendKvQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = s.dc.openWebsocket(s.cmdQueue, s.evtQueue)
@@ -284,7 +284,7 @@ func (s *session) kvReload(rev int, items []interface{}) bool {
 	logInfo("[Session] Rev %d number of Items: %d", rev, len(items))
 
 	// Clear kvStore
-	kvStore = map[string]*ActionKeyValue{}
+	kvStore = map[string]*KeyValue{}
 
 	for _, i := range items {
 		// TODO: Fix better casting
@@ -292,7 +292,7 @@ func (s *session) kvReload(rev int, items []interface{}) bool {
 		key := item["key"].(string)
 		value := item["value"].(map[string]interface{})
 		mtime, _ := time.Parse(time.RFC3339Nano, item["modificationTime"].(string))
-		kv := &ActionKeyValue{Rev: rev, Value: value, MTime: mtime}
+		kv := &KeyValue{Rev: rev, Value: value, MTime: mtime}
 		kvStore[key] = kv
 		logInfo("[Session] key: %s", key)
 	}
@@ -314,7 +314,7 @@ func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool 
 
 	stored, ok := kvStore[key]
 	if !ok {
-		kvStore[key] = &ActionKeyValue{Rev: rev, Value: value, MTime: time.Now()}
+		kvStore[key] = &KeyValue{Rev: rev, Value: value, MTime: time.Now()}
 		logInfo("[Session] kvSet saved new key %s", key)
 		return true
 	}
@@ -342,7 +342,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 	if !ok {
 		// This can happen if SET and DELETE transactions are out of order.
 		// Record the delete anyway.
-		kvStore[key] = &ActionKeyValue{Rev: rev, MTime: time.Now()}
+		kvStore[key] = &KeyValue{Rev: rev, MTime: time.Now()}
 
 		logInfo("[Session] kvDelete deleted value for key '%s'", key)
 		return true
@@ -360,7 +360,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 	return true
 }
 
-func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
+func (s *session) keyValueHandler(dc *DeviceContext, kv *KeyValue) {
 
 	switch kv.Action {
 	case "reload":
@@ -424,7 +424,7 @@ func sessionIdleLoop() {
 		case c := <-sessCtrl.sendEvent:
 			c.response <- ErrorSessionNotStarted
 
-		case c := <-sessCtrl.setKeyValue:
+		case c := <-sessCtrl.sendKeyValue:
 			c.response <- ErrorSessionNotStarted
 		}
 	}
@@ -458,8 +458,8 @@ func sessionActiveLoop() {
 			sess.evtQueue <- c.event
 			c.response <- nil
 
-		case c := <-sessCtrl.setKeyValue:
-			sess.kvQueue <- c.keyValue
+		case c := <-sessCtrl.sendKeyValue:
+			sess.sendKvQueue <- c.keyValue
 			c.response <- nil
 
 		case <-sessCtrl.ping:
@@ -588,22 +588,22 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 }
 
 func SetKeyValue(key string, value map[string]interface{}) error {
-	ctrl := &sessCtrlSetKeyValue{
-		keyValue: &ActionKeyValue{Action: "set", Key: key, Value: value},
+	ctrl := &sessCtrlSendKeyValue{
+		keyValue: &KeyValue{Action: "set", Key: key, Value: value},
 		response: make(chan error, 1),
 	}
 
-	sessCtrl.setKeyValue <- ctrl
+	sessCtrl.sendKeyValue <- ctrl
 	return <-ctrl.response
 }
 
 func DeleteKeyValue(key string, value map[string]interface{}) error {
-	ctrl := &sessCtrlSetKeyValue{
-		keyValue: &ActionKeyValue{Action: "delete", Key: key, Value: value},
+	ctrl := &sessCtrlSendKeyValue{
+		keyValue: &KeyValue{Action: "delete", Key: key, Value: value},
 		response: make(chan error, 1),
 	}
 
-	sessCtrl.setKeyValue <- ctrl
+	sessCtrl.sendKeyValue <- ctrl
 	return <-ctrl.response
 }
 

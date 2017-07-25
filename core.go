@@ -137,7 +137,7 @@ type (
 		qos       QOSLevel               // not exported to JSON
 	}
 
-	ActionKeyValue struct {
+	KeyValue struct {
 		Action string                 `json:"action"`
 		Key    string                 `json:"key"`
 		Value  map[string]interface{} `json:"value"`
