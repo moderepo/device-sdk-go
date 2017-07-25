@@ -137,9 +137,10 @@ type (
 		qos       QOSLevel               // not exported to JSON
 	}
 
-	DeviceKeyValue struct {
-		Key   string                 `json:"key"`
-		Value map[string]interface{} `json:"value"`
+	ActionKeyValue struct {
+		Action string                 `json:"action"`
+		Key    string                 `json:"key"`
+		Value  map[string]interface{} `json:"value"`
 	}
 
 	// A callback function that handles a device command.

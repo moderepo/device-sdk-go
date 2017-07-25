@@ -20,7 +20,7 @@ type (
 		conn      connection
 		cmdQueue  chan *DeviceCommand
 		evtQueue  chan *DeviceEvent
-		kvQueue   chan *DeviceKeyValue
+		kvQueue   chan *ActionKeyValue
 	}
 
 	sessCtrlStart struct {
@@ -43,7 +43,7 @@ type (
 	}
 
 	sessCtrlSetKeyValue struct {
-		keyValue *DeviceKeyValue
+		keyValue *ActionKeyValue
 		response chan error
 	}
 
@@ -153,7 +153,7 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 		usingMQTT: useMQTT,
 		cmdQueue:  make(chan *DeviceCommand, commandQueueLength),
 		evtQueue:  make(chan *DeviceEvent, eventQueueLength),
-		kvQueue:   make(chan *DeviceKeyValue, eventQueueLength),
+		kvQueue:   make(chan *ActionKeyValue, eventQueueLength),
 	}
 
 	var conn connection
@@ -448,7 +448,7 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 
 func SetKeyValue(key string, value map[string]interface{}) error {
 	ctrl := &sessCtrlSetKeyValue{
-		keyValue: &DeviceKeyValue{Key: key, Value: value},
+		keyValue: &ActionKeyValue{Key: key, Value: value},
 		response: make(chan error, 1),
 	}
 

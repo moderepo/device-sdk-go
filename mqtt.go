@@ -35,7 +35,7 @@ type (
 		subs          map[string]mqttSubscription
 		command       chan<- *DeviceCommand
 		event         <-chan *DeviceEvent
-		keyValue      <-chan *DeviceKeyValue
+		keyValue      <-chan *ActionKeyValue
 		err           chan error
 		doPing        chan time.Duration
 		outPacket     chan packet.Packet
@@ -44,12 +44,6 @@ type (
 		stopEventProc chan bool
 		wgWrite       sync.WaitGroup
 		wgRead        sync.WaitGroup
-	}
-
-	actionKeyValue struct {
-		Action string                 `json:"action"`
-		Key    string                 `json:"key"`
-		Value  map[string]interface{} `json:"value"`
 	}
 )
 
@@ -367,16 +361,10 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
-func (mc *mqttConn) setKeyValue(dkv *DeviceKeyValue) error {
+func (mc *mqttConn) setKeyValue(akv *ActionKeyValue) error {
 	qos := packet.QOSAtLeastOnce
 
-	kv := actionKeyValue{
-		"set",
-		kv.Key,
-		kv.Value,
-	}
-
-	payload, _ := json.Marshal(kv)
+	payload, _ := json.Marshal(akv)
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
 	p.Message = packet.Message{
@@ -409,7 +397,7 @@ func (mc *mqttConn) setKeyValue(dkv *DeviceKeyValue) error {
 	return errors.New("keyValue dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvQueue <-chan *DeviceKeyValue) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvQueue <-chan *ActionKeyValue) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
