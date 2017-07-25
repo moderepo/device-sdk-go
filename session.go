@@ -48,6 +48,11 @@ type (
 		response chan error
 	}
 
+	sessCtrlRecvKeyValue struct {
+		key        string
+		responseKv chan *KeyValue
+	}
+
 	// SessionState represents a state of the device's connection session.
 	SessionState int
 
@@ -83,6 +88,7 @@ var (
 		getState     chan *sessCtrlGetState
 		sendEvent    chan *sessCtrlSendEvent
 		sendKeyValue chan *sessCtrlSendKeyValue
+		recvKeyValue chan *sessCtrlRecvKeyValue
 		ping         <-chan time.Time
 	}
 
@@ -112,6 +118,7 @@ func init() {
 	sessCtrl.getState = make(chan *sessCtrlGetState, 1)
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
 	sessCtrl.sendKeyValue = make(chan *sessCtrlSendKeyValue, 1)
+	sessCtrl.recvKeyValue = make(chan *sessCtrlRecvKeyValue, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
 	go runSessionManager()
@@ -401,8 +408,21 @@ func (s *session) startKeyValueProcessor() {
 		logInfo("[Session] command processor is running")
 		defer logInfo("[Session] command processor is exiting")
 
-		for kv := range s.recvKvQueue {
-			s.keyValueHandler(s.dc, kv)
+		for {
+			select {
+			case kv := <-s.recvKvQueue:
+				if kv == nil {
+					return
+				}
+				s.keyValueHandler(s.dc, kv)
+
+			case r := <-sessCtrl.recvKeyValue:
+				if kv, ok := kvStore[r.key]; ok {
+					r.responseKv <- &KeyValue{Key: kv.Key, Value: kv.Value, Rev: kv.Rev, MTime: kv.MTime}
+				} else {
+					r.responseKv <- nil
+				}
+			}
 		}
 	}()
 }
@@ -606,6 +626,20 @@ func SetKeyValue(key string, value map[string]interface{}) error {
 
 	sessCtrl.sendKeyValue <- ctrl
 	return <-ctrl.response
+}
+
+func GetKeyValue(key string) (map[string]interface{}, bool) {
+	ctrl := &sessCtrlRecvKeyValue{
+		key:        key,
+		responseKv: make(chan *KeyValue, 1),
+	}
+
+	sessCtrl.recvKeyValue <- ctrl
+	if r := <-ctrl.responseKv; r == nil {
+		return nil, false
+	} else {
+		return r.Value, true
+	}
 }
 
 func DeleteKeyValue(key string, value map[string]interface{}) error {
