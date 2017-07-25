@@ -15,12 +15,13 @@ type (
 	}
 
 	session struct {
-		dc        *DeviceContext
-		usingMQTT bool
-		conn      connection
-		cmdQueue  chan *DeviceCommand
-		evtQueue  chan *DeviceEvent
-		kvQueue   chan *ActionKeyValue
+		dc          *DeviceContext
+		usingMQTT   bool
+		conn        connection
+		cmdQueue    chan *DeviceCommand
+		evtQueue    chan *DeviceEvent
+		kvQueue     chan *ActionKeyValue
+		recvKvQueue chan *ActionKeyValue
 	}
 
 	sessCtrlStart struct {
@@ -98,6 +99,8 @@ var (
 
 	sessPingInterval = sessDefaultPingInterval
 	sessPingTimeout  = sessDefaultPingTimeout
+
+	kvStore = map[string]*ActionKeyValue{}
 )
 
 func init() {
@@ -149,11 +152,12 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 
 func initSession(dc *DeviceContext, useMQTT bool) error {
 	sess = &session{
-		dc:        dc,
-		usingMQTT: useMQTT,
-		cmdQueue:  make(chan *DeviceCommand, commandQueueLength),
-		evtQueue:  make(chan *DeviceEvent, eventQueueLength),
-		kvQueue:   make(chan *ActionKeyValue, eventQueueLength),
+		dc:          dc,
+		usingMQTT:   useMQTT,
+		cmdQueue:    make(chan *DeviceCommand, commandQueueLength),
+		evtQueue:    make(chan *DeviceEvent, eventQueueLength),
+		kvQueue:     make(chan *ActionKeyValue, eventQueueLength),
+		recvKvQueue: make(chan *ActionKeyValue, eventQueueLength),
 	}
 
 	var conn connection
@@ -161,7 +165,7 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 
 	if useMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvQueue)
+		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.recvKvQueue, sess.kvQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
@@ -199,6 +203,11 @@ func (s *session) terminate() {
 		close(s.kvQueue)
 		s.kvQueue = nil
 	}
+
+	if s.recvKvQueue != nil {
+		close(s.recvKvQueue)
+		s.recvKvQueue = nil
+	}
 }
 
 func (s *session) disconnect() {
@@ -226,7 +235,7 @@ func (s *session) reconnect() error {
 
 	if s.usingMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvQueue)
+		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.recvKvQueue, s.kvQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = s.dc.openWebsocket(s.cmdQueue, s.evtQueue)
@@ -256,6 +265,50 @@ func (s *session) startCommandProcessor() {
 	}()
 }
 
+func (s *session) kvReload(rev int, items []interface{}) bool {
+	logInfo("Rev %d number of Items: %d", rev, len(items))
+
+	// Clear kvStore
+	kvStore = map[string]*ActionKeyValue{}
+
+	for _, i := range items {
+		// TODO: Fix better casting
+		item := i.(map[string]interface{})
+		key := item["key"].(string)
+		value := item["value"].(map[string]interface{})
+		kv := &ActionKeyValue{Rev: rev, Value: value}
+		kvStore[key] = kv
+		// TODO: Need mtime?
+		logInfo("key: %s", key)
+	}
+
+	return true
+}
+
+func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
+
+	switch kv.Action {
+	case "reload":
+		s.kvReload(kv.Rev, kv.Items)
+	case "set":
+	case "delete":
+
+	default:
+		logError("[Session] received sync message with unknown action %s", kv.Action)
+	}
+}
+
+func (s *session) startKeyValueProcessor() {
+	go func() {
+		logInfo("[Session] command processor is running")
+		defer logInfo("[Session] command processor is exiting")
+
+		for kv := range s.recvKvQueue {
+			s.keyValueHandler(s.dc, kv)
+		}
+	}()
+}
+
 func sessionIdleLoop() {
 	logInfo("[SessionManager] entering idle loop")
 	defer logInfo("[SessionManager] exiting idle loop")
@@ -265,6 +318,7 @@ func sessionIdleLoop() {
 		case c := <-sessCtrl.start:
 			if err := initSession(c.dc, c.useMQTT); err == nil {
 				sess.startCommandProcessor()
+				sess.startKeyValueProcessor()
 				sessState = SessionActive
 			} else {
 				logError("[SessionManager] session not started: %s", err.Error())

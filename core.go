@@ -141,6 +141,8 @@ type (
 		Action string                 `json:"action"`
 		Key    string                 `json:"key"`
 		Value  map[string]interface{} `json:"value"`
+		Rev    int                    `json:"rev"`
+		Items  []interface{}          `json:"items"`
 	}
 
 	// A callback function that handles a device command.

@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 
 	mode "github.com/moderepo/device-sdk-go"
 )
@@ -20,8 +22,9 @@ func initDevice() {
 func main() {
 	initDevice()
 
-	time.Sleep(3 * time.Second)
-	mode.DeleteKeyValue("hoge", map[string]interface{}{"a": 1})
-	fmt.Println("vim-go")
-	time.Sleep(3 * time.Second)
+	c := make(chan os.Signal)
+	signal.Notify(c, syscall.SIGTERM, syscall.SIGINT)
+
+	sig := <-c
+	fmt.Printf("Signal %d\n", sig)
 }
