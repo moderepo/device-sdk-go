@@ -341,7 +341,7 @@ func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool 
 	}
 
 	if rev <= stored.Rev {
-		logInfo("[Session] kvSet ignored obsolete update (rev %d) to key %s (rev %d)", key, rev, stored.Rev)
+		logInfo("[Session] kvSet ignored obsolete update (rev %d) to key %s (rev %d)", rev, key, stored.Rev)
 		return false
 	}
 
@@ -370,7 +370,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 	}
 
 	if rev <= stored.Rev {
-		logInfo("[Session] kvDelete ignored obsolete update (rev %d) to key %s (rev %d)", key, rev, stored.Rev)
+		logInfo("[Session] kvDelete ignored obsolete update (rev %d) to key %s (rev %d)", rev, key, key, stored.Rev)
 		return false
 	}
 
