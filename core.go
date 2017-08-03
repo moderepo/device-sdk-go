@@ -137,13 +137,14 @@ type (
 		qos       QOSLevel               // not exported to JSON
 	}
 
-	KeyValue struct {
-		Action string                 `json:"action"`
-		Key    string                 `json:"key"`
-		Value  map[string]interface{} `json:"value"`
-		Rev    int                    `json:"rev"`
-		Items  []interface{}          `json:"items"`
-		MTime  time.Time              `json:"mtime"`
+	ActionKeyValue struct {
+		Action  string                 `json:"action"`
+		Key     string                 `json:"key"`
+		Value   map[string]interface{} `json:"value"`
+		Rev     int                    `json:"rev"`
+		Items   []interface{}          `json:"items"`
+		MTime   time.Time              `json:"mtime"`
+		Payload []byte
 	}
 
 	// A callback function that handles a device command.

@@ -20,8 +20,8 @@ type (
 		conn        connection
 		cmdQueue    chan *DeviceCommand
 		evtQueue    chan *DeviceEvent
-		sendKvQueue chan *KeyValue
-		recvKvQueue chan *KeyValue
+		sendKvQueue chan *ActionKeyValue
+		recvKvQueue chan *ActionKeyValue
 	}
 
 	sessCtrlStart struct {
@@ -44,14 +44,14 @@ type (
 	}
 
 	sessCtrlSendKeyValue struct {
-		keyValue *KeyValue
+		keyValue *ActionKeyValue
 		response chan error
 	}
 
 	sessCtrlRecvKeyValue struct {
 		getAll     bool
 		key        string
-		responseKv []*KeyValue
+		responseKv []*ActionKeyValue
 		response   chan error
 	}
 
@@ -111,7 +111,7 @@ var (
 	kvReloadHandler KvReloadHandler
 	kvSetHandler    KvSetHandler
 	kvDeleteHandler KvDeleteHandler
-	kvStore         = map[string]*KeyValue{}
+	kvStore         = map[string]*ActionKeyValue{}
 )
 
 func init() {
@@ -180,8 +180,8 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 		usingMQTT:   useMQTT,
 		cmdQueue:    make(chan *DeviceCommand, commandQueueLength),
 		evtQueue:    make(chan *DeviceEvent, eventQueueLength),
-		sendKvQueue: make(chan *KeyValue, eventQueueLength),
-		recvKvQueue: make(chan *KeyValue, eventQueueLength),
+		sendKvQueue: make(chan *ActionKeyValue, eventQueueLength),
+		recvKvQueue: make(chan *ActionKeyValue, eventQueueLength),
 	}
 
 	var conn connection
@@ -292,7 +292,7 @@ func (s *session) startCommandProcessor() {
 func (s *session) kvReload(rev int, items []interface{}) bool {
 	logInfo("[Session] Rev %d number of Items: %d", rev, len(items))
 
-	newKvStore := map[string]*KeyValue{}
+	newKvStore := map[string]*ActionKeyValue{}
 
 	for _, i := range items {
 		item := i.(map[string]interface{})
@@ -311,7 +311,7 @@ func (s *session) kvReload(rev int, items []interface{}) bool {
 			logError("[Session] Failed to parse modificationTime")
 			return false
 		}
-		kv := &KeyValue{Rev: rev, Value: value, MTime: mtime}
+		kv := &ActionKeyValue{Rev: rev, Value: value, MTime: mtime}
 		newKvStore[key] = kv
 		logInfo("[Session] key: %s", key)
 	}
@@ -334,7 +334,7 @@ func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool 
 
 	stored, ok := kvStore[key]
 	if !ok {
-		kvStore[key] = &KeyValue{Rev: rev, Value: value, MTime: time.Now()}
+		kvStore[key] = &ActionKeyValue{Rev: rev, Value: value, MTime: time.Now()}
 		logInfo("[Session] kvSet saved new key %s", key)
 		return true
 	}
@@ -362,7 +362,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 	if !ok {
 		// This can happen if SET and DELETE transactions are out of order.
 		// Record the delete anyway.
-		kvStore[key] = &KeyValue{Rev: rev, MTime: time.Now()}
+		kvStore[key] = &ActionKeyValue{Rev: rev, MTime: time.Now()}
 
 		logInfo("[Session] kvDelete deleted value for key '%s'", key)
 		return true
@@ -380,7 +380,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 	return true
 }
 
-func (s *session) keyValueHandler(dc *DeviceContext, kv *KeyValue) {
+func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
 
 	switch kv.Action {
 	case "reload":
@@ -420,14 +420,14 @@ func (s *session) startKeyValueProcessor() {
 
 			case r := <-sessCtrl.recvKeyValue:
 				if r.getAll {
-					kvs := []*KeyValue{}
+					kvs := []*ActionKeyValue{}
 					for k, v := range kvStore {
-						kvs = append(kvs, &KeyValue{Key: k, Value: v.Value, MTime: v.MTime})
+						kvs = append(kvs, &ActionKeyValue{Key: k, Value: v.Value, MTime: v.MTime})
 					}
 					r.responseKv = kvs
 				} else {
 					if kv, ok := kvStore[r.key]; ok {
-						r.responseKv = []*KeyValue{&KeyValue{Key: kv.Key, Value: kv.Value, Rev: kv.Rev, MTime: kv.MTime}}
+						r.responseKv = []*ActionKeyValue{&ActionKeyValue{Key: kv.Key, Value: kv.Value, Rev: kv.Rev, MTime: kv.MTime}}
 					} else {
 						r.responseKv = nil
 					}
@@ -631,7 +631,7 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 
 func SetKeyValue(key string, value map[string]interface{}) error {
 	ctrl := &sessCtrlSendKeyValue{
-		keyValue: &KeyValue{Action: "set", Key: key, Value: value},
+		keyValue: &ActionKeyValue{Action: "set", Key: key, Value: value},
 		response: make(chan error, 1),
 	}
 
@@ -679,7 +679,7 @@ func GetAllKeyValues() []*KeyValue {
 
 func DeleteKeyValue(key string, value map[string]interface{}) error {
 	ctrl := &sessCtrlSendKeyValue{
-		keyValue: &KeyValue{Action: "delete", Key: key, Value: value},
+		keyValue: &ActionKeyValue{Action: "delete", Key: key, Value: value},
 		response: make(chan error, 1),
 	}
 

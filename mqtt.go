@@ -35,8 +35,8 @@ type (
 		subs          map[string]mqttSubscription
 		command       chan<- *DeviceCommand
 		event         <-chan *DeviceEvent
-		recvKeyValue  chan<- *KeyValue
-		sendKeyValue  <-chan *KeyValue
+		recvKeyValue  chan<- *ActionKeyValue
+		sendKeyValue  <-chan *ActionKeyValue
 		err           chan error
 		doPing        chan time.Duration
 		outPacket     chan packet.Packet
@@ -196,10 +196,12 @@ func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 }
 
 func (mc *mqttConn) handleKeyValueMsg(p *packet.PublishPacket) error {
-	var kv KeyValue
+	var kv ActionKeyValue
 	if err := decodeOpaqueJSON(p.Message.Payload, &kv); err != nil {
 		return fmt.Errorf("message data is not valid key value JSON: %s", err.Error())
 	}
+
+	kv.Payload = p.Message.Payload
 
 	if kv.Action == "" {
 		return errors.New("message data is not valid command JSON: no action field")
@@ -376,7 +378,7 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
-func (mc *mqttConn) setKeyValue(kv *KeyValue) error {
+func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
 	// Always QoS1
 	qos := packet.QOSAtLeastOnce
 
@@ -413,7 +415,7 @@ func (mc *mqttConn) setKeyValue(kv *KeyValue) error {
 	return errors.New("keyValue dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, recvKvQueue chan<- *KeyValue, kvQueue <-chan *KeyValue) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, recvKvQueue chan<- *ActionKeyValue, kvQueue <-chan *ActionKeyValue) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
