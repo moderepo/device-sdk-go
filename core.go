@@ -147,11 +147,16 @@ type (
 		Payload []byte
 	}
 
+	KeyValue struct {
+		Key   string                 `json:"key"`
+		Value map[string]interface{} `json:"value"`
+	}
+
 	// A callback function that handles a device command.
 	CommandHandler func(*DeviceContext, *DeviceCommand)
 
-	KvReloadHandler func(items []map[string]interface{}) bool
-	KvSetHandler    func(key string, value map[string]interface{}) bool
+	KvReloadHandler func(items []*KeyValue) bool
+	KvSetHandler    func(kv *KeyValue) bool
 	KvDeleteHandler func(key string) bool
 )
 

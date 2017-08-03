@@ -1,6 +1,7 @@
 package mode
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -385,15 +386,21 @@ func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
 	switch kv.Action {
 	case "reload":
 		if s.kvReload(kv.Rev, kv.Items) && kvReloadHandler != nil {
-			items := []map[string]interface{}{}
+			items := []*KeyValue{}
 			for _, item := range kv.Items {
-				items = append(items, item.(map[string]interface{}))
+
+				buf, _ := json.Marshal(item)
+
+				var kv KeyValue
+				json.Unmarshal(buf, &kv)
+
+				items = append(items, &kv)
 			}
 			kvReloadHandler(items)
 		}
 	case "set":
 		if s.kvSet(kv.Rev, kv.Key, kv.Value) && kvSetHandler != nil {
-			kvSetHandler(kv.Key, kv.Value)
+			kvSetHandler(&KeyValue{Key: kv.Key, Value: kv.Value})
 		}
 	case "delete":
 		if s.kvDelete(kv.Rev, kv.Key) && kvDeleteHandler != nil {
