@@ -336,7 +336,7 @@ func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool 
 	stored, ok := kvStore[key]
 	if !ok {
 		kvStore[key] = &ActionKeyValue{Rev: rev, Value: value, MTime: time.Now()}
-		logInfo("[Session] kvSet saved new key %s", key)
+		logInfo("[Session] kvSet saved new key %s (rev %d)", key, rev)
 		return true
 	}
 
@@ -348,7 +348,7 @@ func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool 
 	stored.Rev = rev
 	stored.Value = value
 	stored.MTime = time.Now()
-	logInfo("[Session] kvSet updated value of key %s", key)
+	logInfo("[Session] kvSet updated value of key %s (rev %d)", key, rev)
 
 	return true
 }
@@ -365,7 +365,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 		// Record the delete anyway.
 		kvStore[key] = &ActionKeyValue{Rev: rev, MTime: time.Now()}
 
-		logInfo("[Session] kvDelete deleted value for key '%s'", key)
+		logInfo("[Session] kvDelete deleted value for key '%s' (rev %d)", key, rev)
 		return true
 	}
 
@@ -377,7 +377,7 @@ func (s *session) kvDelete(rev int, key string) bool {
 	stored.Rev = rev
 	stored.Value = nil
 	stored.MTime = time.Now()
-	logInfo("[Session] kvDelete deleted value for key %s", key)
+	logInfo("[Session] kvDelete deleted value for key %s (rev %d)", key, rev)
 	return true
 }
 
