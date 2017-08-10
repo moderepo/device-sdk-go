@@ -291,7 +291,10 @@ func (s *session) startCommandProcessor() {
 }
 
 func (s *session) kvReload(rev int, items []interface{}) bool {
-	logInfo("[Session] Rev %d number of Items: %d", rev, len(items))
+	logInfo("[Session] kvReload Rev %d number of Items: %d", rev, len(items))
+	if kvStore != nil {
+		return false
+	}
 
 	newKvStore := map[string]*ActionKeyValue{}
 
