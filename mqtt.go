@@ -83,6 +83,9 @@ func (mc *mqttConn) sendPacket(p packet.Packet) error {
 
 func (mc *mqttConn) getPacketID() uint16 {
 	mc.packetID += 1
+	if packetID == 0 {
+		mc.packetID = 1
+	}
 	return mc.packetID
 }
 
