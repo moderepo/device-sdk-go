@@ -112,7 +112,7 @@ var (
 	kvReloadHandler KvReloadHandler
 	kvSetHandler    KvSetHandler
 	kvDeleteHandler KvDeleteHandler
-	kvStore         = map[string]*ActionKeyValue{}
+	kvStore         map[string]*ActionKeyValue
 )
 
 func init() {
@@ -307,12 +307,13 @@ func (s *session) kvReload(rev int, items []interface{}) bool {
 		}
 		value, ok := item["value"].(map[string]interface{})
 		if !ok {
-			logError("[Session] Failed to get value")
-			return false
+			logError("[Session] Failed to get value: key(%s)", key)
+			// TODO: assuming the value is always hash, but interface{} is better?
+			continue
 		}
 		mtime, err := time.Parse(time.RFC3339Nano, item["modificationTime"].(string))
 		if err != nil {
-			logError("[Session] Failed to parse modificationTime")
+			logError("[Session] Failed to parse modificationTime: key(%s)", key)
 			return false
 		}
 		kv := &ActionKeyValue{Rev: rev, Value: value, MTime: mtime}
@@ -399,15 +400,15 @@ func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
 
 				items = append(items, &kv)
 			}
-			kvReloadHandler(items)
+			kvReloadHandler(dc, items)
 		}
 	case "set":
 		if s.kvSet(kv.Rev, kv.Key, kv.Value) && kvSetHandler != nil {
-			kvSetHandler(&KeyValue{Key: kv.Key, Value: kv.Value})
+			kvSetHandler(dc, &KeyValue{Key: kv.Key, Value: kv.Value})
 		}
 	case "delete":
 		if s.kvDelete(kv.Rev, kv.Key) && kvDeleteHandler != nil {
-			kvDeleteHandler(kv.Key)
+			kvDeleteHandler(dc, kv.Key)
 		}
 
 	default:
