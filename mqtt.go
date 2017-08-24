@@ -127,7 +127,7 @@ func (mc *mqttConn) subscribe(topic string, msgHandler mqttMsgHandler) error {
 	subs := []packet.Subscription{
 		packet.Subscription{
 			Topic: topic,
-			QOS:   packet.QOSAtLeastOnce, // MODE only supports QoS0 for subscriptions
+			QOS:   packet.QOSAtMostOnce, // MODE only supports QoS0 for subscriptions
 		},
 	}
 
