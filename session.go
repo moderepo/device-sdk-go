@@ -452,9 +452,11 @@ func sessionIdleLoop() {
 	for {
 		select {
 		case c := <-sessCtrl.start:
-			if err := initSession(c.dc, c.useMQTT); err == nil {
-				sess.startCommandProcessor()
-				sess.startKeyValueProcessor()
+			err := initSession(c.dc, c.useMQTT)
+			sess.startCommandProcessor()
+			sess.startKeyValueProcessor()
+
+			if err == nil {
 				sessState = SessionActive
 			} else {
 				logError("[SessionManager] session not started: %s", err.Error())
