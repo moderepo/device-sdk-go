@@ -85,6 +85,7 @@ func (ws *wsConn) runReader() {
 	for {
 		msgType, data, err := ws.conn.ReadMessage()
 		if err != nil {
+			logError("[WS] failed to read message: %s", err.Error())
 			ws.err <- err
 			break
 		}
@@ -207,7 +208,14 @@ func (ws *wsConn) close() {
 		logError("[WS] failed to send CLOSE control msg: %s", err.Error())
 	}
 
-	ws.conn.Close()  // this will break the listen loop
+	/*
+		Closing the websocket connection here should cause any blocking read()
+		call to fail, thus forcing the reader to exit. But sometimes the read
+		operation may be stuck if there is some network issue. Setting a read
+		deadline here may force the read() call to fail.
+	*/
+	ws.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 500))
+	ws.conn.Close()
 	ws.wgRead.Wait() // wait for reader to finish
 }
 

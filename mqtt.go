@@ -223,6 +223,7 @@ func (mc *mqttConn) runPacketReader() {
 	for {
 		p, err := mc.stream.Read()
 		if err != nil {
+			logError("[MQTT] failed to read packet: %s", err.Error())
 			mc.err <- err
 			break
 		}
@@ -247,7 +248,14 @@ func (mc *mqttConn) runPacketWriter() {
 	logInfo("[MQTT] packet writer is running")
 	defer func() {
 		logInfo("[MQTT] packet writer is exiting")
-		mc.conn.Close() // this will cause packet reader to exit
+		/*
+			Closing the network connection here should cause any blocking read()
+			call to fail, thus forcing the reader to exit. But sometimes the read
+			operation may be stuck if there is some network issue. Setting a read
+			deadline here may force the read() call to fail.
+		*/
+		mc.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 500))
+		mc.conn.Close()
 	}()
 
 	for p := range mc.outPacket {
