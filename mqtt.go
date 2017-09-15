@@ -28,28 +28,28 @@ type (
 	}
 
 	mqttConn struct {
-		conn          net.Conn
-		stream        *packet.Stream
-		dc            *DeviceContext
-		packetID      uint16
-		subs          map[string]mqttSubscription
-		command       chan<- *DeviceCommand
-		event         <-chan *DeviceEvent
-		recvKeyValue  chan<- *ActionKeyValue
-		sendKeyValue  <-chan *ActionKeyValue
+		conn     net.Conn
+		stream   *packet.Stream
+		dc       *DeviceContext
+		packetID uint16
+		subs     map[string]mqttSubscription
+		command  chan<- *DeviceCommand
+		event    <-chan *DeviceEvent
+		kvSync   chan<- *keyValueSync
+		//sendKeyValue  <-chan *ActionKeyValue
 		err           chan error
 		doPing        chan time.Duration
 		outPacket     chan packet.Packet
 		puback        chan *packet.PubackPacket
 		pingresp      chan *packet.PingrespPacket
-		stopEventProc chan bool
+		stopPublisher chan bool
 		wgWrite       sync.WaitGroup
 		wgRead        sync.WaitGroup
 	}
 )
 
 func (mc *mqttConn) close() {
-	close(mc.stopEventProc) // tell event processor to quit
+	close(mc.stopPublisher) // tell uptream processor to quit
 	close(mc.doPing)        // tell pinger to quit
 
 	mc.wgWrite.Wait() // wait for event processor and pinger to finish
@@ -199,18 +199,17 @@ func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 }
 
 func (mc *mqttConn) handleKeyValueMsg(p *packet.PublishPacket) error {
-	var kv ActionKeyValue
-	if err := decodeOpaqueJSON(p.Message.Payload, &kv); err != nil {
-		return fmt.Errorf("message data is not valid key value JSON: %s", err.Error())
+	var kvSync keyValueSync
+
+	if err := decodeOpaqueJSON(p.Message.Payload, &kvSync); err != nil {
+		return fmt.Errorf("message data is not valid key-value sync JSON: %s", err.Error())
 	}
 
-	kv.Payload = p.Message.Payload
-
-	if kv.Action == "" {
-		return errors.New("message data is not valid command JSON: no action field")
+	if kvSync.Action == "" {
+		return errors.New("message data is not valid key-value sync JSON: no action field")
 	}
 
-	mc.recvKeyValue <- &kv
+	mc.kvSync <- &kvSync
 	return nil
 }
 
@@ -313,28 +312,30 @@ func (mc *mqttConn) runPinger() {
 	}
 }
 
-func (mc *mqttConn) runUpstreamProcessor() {
-	logInfo("[MQTT] event processor is running")
+func (mc *mqttConn) runPublisher() {
+	logInfo("[MQTT] publisher is running")
 	mc.wgWrite.Add(1)
 
 	defer func() {
-		logInfo("[MQTT] event processor is exiting")
+		logInfo("[MQTT] publisher is exiting")
 		mc.wgWrite.Done()
 	}()
 
 	for {
 		select {
-		case <-mc.stopEventProc:
+		case <-mc.stopPublisher:
 			return
 
 		case e := <-mc.event:
 			if err := mc.sendEvent(e); err != nil {
 				logError("[MQTT] failed to send event: %s", err.Error())
 			}
-		case kv := <-mc.sendKeyValue:
-			if err := mc.setKeyValue(kv); err != nil {
-				logError("[MQTT] failed to set keyValue: %s", err.Error())
-			}
+			/*
+				case kv := <-mc.sendKeyValue:
+					if err := mc.setKeyValue(kv); err != nil {
+						logError("[MQTT] failed to set keyValue: %s", err.Error())
+					}
+			*/
 		}
 	}
 }
@@ -389,6 +390,7 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
+/*
 func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
 	// Always QoS1
 	qos := packet.QOSAtLeastOnce
@@ -425,8 +427,8 @@ func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
 
 	return errors.New("keyValue dropped")
 }
-
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, recvKvQueue chan<- *ActionKeyValue, kvQueue <-chan *ActionKeyValue) (*mqttConn, error) {
+*/
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvSyncQueue chan<- *keyValueSync) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -469,10 +471,10 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 
 	mc.command = cmdQueue
 	mc.event = evtQueue
-	mc.recvKeyValue = recvKvQueue
-	mc.sendKeyValue = kvQueue
+	mc.kvSync = kvSyncQueue
+	//mc.sendKeyValue = kvQueue
 	mc.doPing = make(chan time.Duration, 1)
-	mc.stopEventProc = make(chan bool)
+	mc.stopPublisher = make(chan bool)
 	mc.err = make(chan error, 10) // make sure this won't block
 	mc.outPacket = make(chan packet.Packet, 1)
 	mc.puback = make(chan *packet.PubackPacket, 1)
@@ -480,7 +482,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 
 	go mc.runPacketReader()
 	go mc.runPacketWriter()
-	go mc.runUpstreamProcessor()
+	go mc.runPublisher()
 	go mc.runPinger()
 
 	return mc, nil

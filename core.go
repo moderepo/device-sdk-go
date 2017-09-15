@@ -58,9 +58,9 @@ var (
 	deviceKeyValueRetryInterval      = time.Second * 5
 
 	// TBD: how much buffering should we allow?
-	eventQueueLength    = 128
-	keyValueQueueLength = 128
-	commandQueueLength  = 128
+	eventQueueLength        = 128
+	commandQueueLength      = 128
+	keyValueSyncQueueLength = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies
@@ -137,27 +137,24 @@ type (
 		qos       QOSLevel               // not exported to JSON
 	}
 
-	ActionKeyValue struct {
-		Action  string                 `json:"action"`
-		Key     string                 `json:"key"`
-		Value   map[string]interface{} `json:"value"`
-		Rev     int                    `json:"rev"`
-		Items   []interface{}          `json:"items"`
-		MTime   time.Time              `json:"mtime"`
-		Payload []byte
-	}
-
+	// KeyValue represents a key-value pair stored in the Device Data Proxy.
 	KeyValue struct {
-		Key   string                 `json:"key"`
-		Value map[string]interface{} `json:"value"`
+		Key              string      `json:"key"`
+		Value            interface{} `json:"value"`
+		ModificationTime time.Time   `json:"modificationTime"`
 	}
 
 	// A callback function that handles a device command.
 	CommandHandler func(*DeviceContext, *DeviceCommand)
 
-	KvReloadHandler func(*DeviceContext, []*KeyValue) bool
-	KvSetHandler    func(*DeviceContext, *KeyValue) bool
-	KvDeleteHandler func(*DeviceContext, string) bool
+	// A callback function that handles a full reload of all key-value pairs.
+	KvReloadHandler func(*DeviceContext, []*KeyValue)
+
+	// A callback function that handles an update to a key-value pair.
+	KvSetHandler func(*DeviceContext, *KeyValue)
+
+	// A callback function that handles a deletion of a key-value pair.
+	KvDeleteHandler func(*DeviceContext, string)
 )
 
 // ProvisionDevice is used for on-demand device provisioning. It takes a
