@@ -21,8 +21,7 @@ type (
 		conn      connection
 		cmdQueue  chan *DeviceCommand
 		evtQueue  chan *DeviceEvent
-		//sendKvQueue chan *ActionKeyValue
-		kvCache *keyValueCache
+		kvCache   *keyValueCache
 	}
 
 	sessCtrlStart struct {
@@ -211,7 +210,7 @@ func initSession(dc *DeviceContext, useMQTT bool) error {
 
 	if useMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvCache.syncQueue)
+		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
@@ -245,13 +244,6 @@ func (s *session) terminate() {
 		s.evtQueue = nil
 	}
 
-	/*
-		if s.sendKvQueue != nil {
-			close(s.sendKvQueue)
-			s.sendKvQueue = nil
-		}
-	*/
-
 	s.kvCache.terminate()
 }
 
@@ -265,11 +257,9 @@ func (s *session) disconnect() {
 		logInfo("[Session] pending events in queue: %d", n)
 	}
 
-	/*
-		if n := len(s.sendKvQueue); n > 0 {
-			logInfo("[Session] pending key value set in queue: %d", n)
-		}
-	*/
+	if n := len(s.kvCache.pushQueue); n > 0 {
+		logInfo("[Session] pending key-value updates in queue: %d", n)
+	}
 }
 
 func (s *session) reconnect() error {
@@ -282,7 +272,7 @@ func (s *session) reconnect() error {
 
 	if s.usingMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvCache.syncQueue)
+		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = s.dc.openWebsocket(s.cmdQueue, s.evtQueue)
@@ -327,6 +317,24 @@ func handleKVAccess(c *sessCtrlAccessKV, allowReadOnly bool) {
 				c.responseKV <- kv
 			}
 			close(c.responseKV)
+		} else {
+			c.responseErr <- err
+		}
+
+	case kvActionSet:
+		if allowReadOnly {
+			c.responseErr <- ErrorSessionRecovering
+		} else if err := sess.kvCache.setKeyValue(c.key, c.value); err == nil {
+			c.responseErr <- nil
+		} else {
+			c.responseErr <- err
+		}
+
+	case kvActionDelete:
+		if allowReadOnly {
+			c.responseErr <- ErrorSessionRecovering
+		} else if err := sess.kvCache.deleteKeyValue(c.key); err == nil {
+			c.responseErr <- nil
 		} else {
 			c.responseErr <- err
 		}
@@ -524,18 +532,6 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 	return <-ctrl.response
 }
 
-/*
-func SetKeyValue(key string, value map[string]interface{}) error {
-	ctrl := &sessCtrlSendKeyValue{
-		keyValue: &ActionKeyValue{Action: "set", Key: key, Value: value},
-		response: make(chan error, 1),
-	}
-
-	sessCtrl.sendKeyValue <- ctrl
-	return <-ctrl.response
-}
-*/
-
 // GetKeyValue looks up a key-value pair from the Device Data Proxy.
 // It returns an error if the device connection session is in idle state.
 // When the session is in recovery state, the key-value pair returned will
@@ -594,17 +590,47 @@ func GetAllKeyValues() ([]*KeyValue, error) {
 	}
 }
 
-/*
-func DeleteKeyValue(key string, value map[string]interface{}) error {
-	ctrl := &sessCtrlSendKeyValue{
-		keyValue: &ActionKeyValue{Action: "delete", Key: key, Value: value},
-		response: make(chan error, 1),
+// SetKeyValue stores a key-value pair to the Device Data Proxy.
+// It returns an error if the device connection session is in idle or recovery state.
+//
+// IMPORTANT: Race condition may arise if both the device and someone else are
+// updating the same key-value pair.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func SetKeyValue(key string, value interface{}) error {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionSet,
+		key:         key,
+		value:       value,
+		responseErr: make(chan error, 1),
 	}
 
-	sessCtrl.sendKeyValue <- ctrl
-	return <-ctrl.response
+	sessCtrl.accessKV <- ctrl
+	return <-ctrl.responseErr
 }
-*/
+
+// DeleteKeyValue deletes a key-value pair from the Device Data Proxy.
+// It returns an error if the device connection session is in idle or recovery state.
+//
+// IMPORTANT: Race condition may arise if both the device and someone else are
+// updating the same key-value pair.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func DeleteKeyValue(key string) error {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionDelete,
+		key:         key,
+		responseErr: make(chan error, 1),
+	}
+
+	sessCtrl.accessKV <- ctrl
+	return <-ctrl.responseErr
+}
+
 func (s SessionState) String() string {
 	switch s {
 	case SessionIdle:

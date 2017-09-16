@@ -26,7 +26,8 @@ type (
 		dc          *DeviceContext
 		initialized bool
 		items       map[string]*keyValueCacheItem
-		syncQueue   chan *keyValueSync
+		syncQueue   chan *keyValueSync // for pulling changes from cloud
+		pushQueue   chan *keyValueSync // for pushing changes to cloud
 		access      chan func()
 	}
 )
@@ -38,14 +39,15 @@ const (
 )
 
 var (
-	ErrorCacheNotReady = errors.New("cache not ready")
-	ErrorKeyNotFound   = errors.New("key not found")
+	ErrorKeyValuesNotReady = errors.New("key-values not ready")
+	ErrorKeyNotFound       = errors.New("key not found")
 )
 
 func newKeyValueCache(dc *DeviceContext) *keyValueCache {
 	return &keyValueCache{
 		dc:        dc,
 		syncQueue: make(chan *keyValueSync, keyValueSyncQueueLength),
+		pushQueue: make(chan *keyValueSync, keyValuePushQueueLength),
 		access:    make(chan func()),
 	}
 }
@@ -73,6 +75,11 @@ func (cache *keyValueCache) terminate() {
 	if cache.syncQueue != nil {
 		close(cache.syncQueue)
 		cache.syncQueue = nil
+	}
+
+	if cache.pushQueue != nil {
+		close(cache.pushQueue)
+		cache.pushQueue = nil
 	}
 }
 
@@ -173,7 +180,7 @@ func (cache *keyValueCache) getKeyValue(key string) (*KeyValue, error) {
 
 	cache.access <- func() {
 		if !cache.initialized {
-			resErr <- ErrorCacheNotReady
+			resErr <- ErrorKeyValuesNotReady
 			return
 		}
 
@@ -203,7 +210,7 @@ func (cache *keyValueCache) getAllKeyValues() ([]*KeyValue, error) {
 
 	cache.access <- func() {
 		if !cache.initialized {
-			resErr <- ErrorCacheNotReady
+			resErr <- ErrorKeyValuesNotReady
 			return
 		}
 
@@ -236,4 +243,65 @@ func (cache *keyValueCache) getAllKeyValues() ([]*KeyValue, error) {
 			res = append(res, kv)
 		}
 	}
+}
+
+func (cache *keyValueCache) setKeyValue(key string, value interface{}) error {
+	resErr := make(chan error)
+
+	cache.access <- func() {
+		if !cache.initialized {
+			resErr <- ErrorKeyValuesNotReady
+			return
+		}
+
+		cacheItem, ok := cache.items[key]
+		if !ok {
+			cacheItem = &keyValueCacheItem{}
+			cache.items[key] = cacheItem
+		}
+
+		// We intentionally avoid incrementing the revision of the item.
+		cacheItem.value = value
+		cacheItem.modificationTime = time.Now()
+		cacheItem.deleted = false // just in case item was previously deleted
+
+		cache.pushQueue <- &keyValueSync{
+			Action: kvSyncActionSet,
+			Key:    key,
+			Value:  value,
+		}
+
+		resErr <- nil
+	}
+
+	return <-resErr
+}
+
+func (cache *keyValueCache) deleteKeyValue(key string) error {
+	resErr := make(chan error)
+
+	cache.access <- func() {
+		if !cache.initialized {
+			resErr <- ErrorKeyValuesNotReady
+			return
+		}
+
+		if cacheItem, ok := cache.items[key]; ok {
+			// Mark item as deleted.
+			// We intentionally avoid incrementing the revision of the item.
+			cacheItem.deleted = true
+			cacheItem.modificationTime = time.Now()
+
+			cache.pushQueue <- &keyValueSync{
+				Action: kvSyncActionDelete,
+				Key:    key,
+			}
+
+			resErr <- nil
+		} else {
+			resErr <- ErrorKeyNotFound
+		}
+	}
+
+	return <-resErr
 }

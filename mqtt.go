@@ -28,15 +28,15 @@ type (
 	}
 
 	mqttConn struct {
-		conn     net.Conn
-		stream   *packet.Stream
-		dc       *DeviceContext
-		packetID uint16
-		subs     map[string]mqttSubscription
-		command  chan<- *DeviceCommand
-		event    <-chan *DeviceEvent
-		kvSync   chan<- *keyValueSync
-		//sendKeyValue  <-chan *ActionKeyValue
+		conn          net.Conn
+		stream        *packet.Stream
+		dc            *DeviceContext
+		packetID      uint16
+		subs          map[string]mqttSubscription
+		command       chan<- *DeviceCommand
+		event         <-chan *DeviceEvent
+		kvSync        chan<- *keyValueSync
+		kvPush        <-chan *keyValueSync
 		err           chan error
 		doPing        chan time.Duration
 		outPacket     chan packet.Packet
@@ -328,14 +328,13 @@ func (mc *mqttConn) runPublisher() {
 
 		case e := <-mc.event:
 			if err := mc.sendEvent(e); err != nil {
-				logError("[MQTT] failed to send event: %s", err.Error())
+				logError("[MQTT] publisher failed to send event: %s", err.Error())
 			}
-			/*
-				case kv := <-mc.sendKeyValue:
-					if err := mc.setKeyValue(kv); err != nil {
-						logError("[MQTT] failed to set keyValue: %s", err.Error())
-					}
-			*/
+
+		case kvSync := <-mc.kvPush:
+			if err := mc.sendKeyValueUpdate(kvSync); err != nil {
+				logError("[MQTT] publisher failed to send key-value update: %s", err.Error())
+			}
 		}
 	}
 }
@@ -390,12 +389,12 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
-/*
-func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
+func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	// Always QoS1
 	qos := packet.QOSAtLeastOnce
 
-	payload, _ := json.Marshal(kv)
+	payload, _ := json.Marshal(kvSync)
+
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
 	p.Message = packet.Message{
@@ -404,15 +403,15 @@ func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
 		Payload: payload,
 	}
 
-	for count := uint(1); count <= maxDeviceKeyValueAttempts; count++ {
+	for count := uint(1); count <= maxKeyValueUpdateAttempts; count++ {
 		mc.outPacket <- p
 
-		logInfo("[MQTT] key value delivery attempt #%d for packet ID %d", count, p.PacketID)
+		logInfo("[MQTT] key-value update attempt #%d for packet ID %d", count, p.PacketID)
 		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
 
 		select {
-		case <-time.After(deviceKeyValueRetryInterval):
-			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, deviceKeyValueRetryInterval)
+		case <-time.After(keyValueUpdateRetryInterval):
+			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, keyValueUpdateRetryInterval)
 
 		case ack := <-mc.puback:
 			if ack.PacketID == p.PacketID {
@@ -425,10 +424,10 @@ func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
 		p.Dup = true
 	}
 
-	return errors.New("keyValue dropped")
+	return errors.New("key-value update dropped")
 }
-*/
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvSyncQueue chan<- *keyValueSync) (*mqttConn, error) {
+
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -472,7 +471,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	mc.command = cmdQueue
 	mc.event = evtQueue
 	mc.kvSync = kvSyncQueue
-	//mc.sendKeyValue = kvQueue
+	mc.kvPush = kvPushQueue
 	mc.doPing = make(chan time.Duration, 1)
 	mc.stopPublisher = make(chan bool)
 	mc.err = make(chan error, 10) // make sure this won't block
