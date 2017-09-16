@@ -137,6 +137,9 @@ type (
 		qos       QOSLevel               // not exported to JSON
 	}
 
+	// A callback function that handles a device command.
+	CommandHandler func(*DeviceContext, *DeviceCommand)
+
 	// KeyValue represents a key-value pair stored in the Device Data Proxy.
 	KeyValue struct {
 		Key              string      `json:"key"`
@@ -144,17 +147,17 @@ type (
 		ModificationTime time.Time   `json:"modificationTime"`
 	}
 
-	// A callback function that handles a device command.
-	CommandHandler func(*DeviceContext, *DeviceCommand)
+	// A callback function that is invoked when the Device Data Proxy is ready
+	// to be accessed.
+	KeyValuesReadyCallback func(*DeviceContext)
 
-	// A callback function that handles a full reload of all key-value pairs.
-	KvReloadHandler func(*DeviceContext, []*KeyValue)
+	// A callback function that is invoked when a key-value pair has been added
+	// or updated.
+	KeyValueStoredCallback func(*DeviceContext, *KeyValue)
 
-	// A callback function that handles an update to a key-value pair.
-	KvSetHandler func(*DeviceContext, *KeyValue)
-
-	// A callback function that handles a deletion of a key-value pair.
-	KvDeleteHandler func(*DeviceContext, string)
+	// A callback function that is invoked when a key-value pair has been deleted.
+	// The key of the deleted key-value is passed in the argument.
+	KeyValueDeletedCallback func(*DeviceContext, string)
 )
 
 // ProvisionDevice is used for on-demand device provisioning. It takes a
@@ -231,6 +234,10 @@ func (cmd *DeviceCommand) String() string {
 	} else {
 		return fmt.Sprintf("{Action:\"%s\", Parameters:%s}", cmd.Action, string(cmd.payload))
 	}
+}
+
+func (kv *KeyValue) String() string {
+	return fmt.Sprintf("{Key:\"%s\", Value:%v, LastModified:%s}", kv.Key, kv.Value, kv.ModificationTime.Format(time.RFC3339))
 }
 
 // A special JSON decoder that makes sure numbers in command parameters

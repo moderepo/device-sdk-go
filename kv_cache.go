@@ -23,6 +23,7 @@ type (
 	}
 
 	keyValueCache struct {
+		dc          *DeviceContext
 		initialized bool
 		items       map[string]*keyValueCacheItem
 		syncQueue   chan *keyValueSync
@@ -37,13 +38,13 @@ const (
 )
 
 var (
-	ErrCacheNotReady  = errors.New("cache not ready")
-	ErrKeyNotFound    = errors.New("key not found")
-	ErrObsoleteUpdate = errors.New("obsolete update")
+	ErrorCacheNotReady = errors.New("cache not ready")
+	ErrorKeyNotFound   = errors.New("key not found")
 )
 
-func newKeyValueCache() *keyValueCache {
+func newKeyValueCache(dc *DeviceContext) *keyValueCache {
 	return &keyValueCache{
+		dc:        dc,
 		syncQueue: make(chan *keyValueSync, keyValueSyncQueueLength),
 		access:    make(chan func()),
 	}
@@ -75,7 +76,7 @@ func (cache *keyValueCache) terminate() {
 	}
 }
 
-func (cache *keyValueCache) syncReload(kvSync *keyValueSync) error {
+func (cache *keyValueCache) syncReload(kvSync *keyValueSync) {
 	cacheItems := make(map[string]*keyValueCacheItem)
 
 	for _, item := range kvSync.Items {
@@ -90,83 +91,77 @@ func (cache *keyValueCache) syncReload(kvSync *keyValueSync) error {
 	cache.items = cacheItems
 	cache.initialized = true
 
-	return nil
+	if keyValuesReadyCallback != nil {
+		go keyValuesReadyCallback(cache.dc)
+	}
 }
 
-func (cache *keyValueCache) syncSet(kvSync *keyValueSync) error {
+func (cache *keyValueCache) syncSet(kvSync *keyValueSync) {
 	if !cache.initialized {
-		return ErrCacheNotReady
+		logInfo("[keyValueCache] ignored update to key '%s' because cache is not yet initialized", kvSync.Key)
+		return
 	}
 
-	if cacheItem, ok := cache.items[kvSync.Key]; ok {
+	cacheItem, ok := cache.items[kvSync.Key]
+	if ok {
 		if cacheItem.revision >= kvSync.Revision {
 			logInfo("[keyValueCache] ignored obsolete update (rev %d) to key '%s' (rev %d)", kvSync.Revision, kvSync.Key, cacheItem.revision)
-			return ErrObsoleteUpdate
+			return
 		}
-
-		cacheItem.revision = kvSync.Revision
-		cacheItem.value = kvSync.Value
-		cacheItem.modificationTime = time.Now()
-		cacheItem.deleted = false // just in case item was previously deleted
-		logInfo("[keyValueCache] updated value of key '%s' (new rev %d)", kvSync.Key, kvSync.Revision)
 	} else {
-		cache.items[kvSync.Key] = &keyValueCacheItem{
-			revision:         kvSync.Revision,
-			value:            kvSync.Value,
-			modificationTime: time.Now(),
-		}
-		logInfo("[keyValueCache] saved new key '%s' (new rev %d)", kvSync.Key, kvSync.Revision)
+		cacheItem = &keyValueCacheItem{}
+		cache.items[kvSync.Key] = cacheItem
 	}
 
-	return nil
+	cacheItem.revision = kvSync.Revision
+	cacheItem.value = kvSync.Value
+	cacheItem.modificationTime = time.Now()
+	cacheItem.deleted = false // just in case item was previously deleted
+	logInfo("[keyValueCache] saved key '%s' (new rev %d)", kvSync.Key, kvSync.Revision)
+
+	if keyValueStoredCallback != nil {
+		go keyValueStoredCallback(cache.dc, &KeyValue{Key: kvSync.Key, Value: kvSync.Value, ModificationTime: cacheItem.modificationTime})
+	}
 }
 
-func (cache *keyValueCache) syncDelete(kvSync *keyValueSync) error {
+func (cache *keyValueCache) syncDelete(kvSync *keyValueSync) {
 	if !cache.initialized {
-		return ErrCacheNotReady
+		logInfo("[keyValueCache] ignored delete to key '%s' because cache is not yet initialized", kvSync.Key)
+		return
 	}
 
-	if cacheItem, ok := cache.items[kvSync.Key]; ok {
+	cacheItem, ok := cache.items[kvSync.Key]
+	if ok {
 		if cacheItem.revision >= kvSync.Revision {
 			logInfo("[keyValueCache] ignored obsolete update (rev %d) to key '%s' (rev %d)", kvSync.Revision, kvSync.Key, cacheItem.revision)
-			return ErrObsoleteUpdate
+			return
 		}
-
-		// Mark item as deleted.
-		cacheItem.revision = kvSync.Revision
-		cacheItem.modificationTime = time.Now()
-		cacheItem.deleted = true
-		logInfo("[keyValueCache] deleted key '%s' (new rev %d)", kvSync.Key, kvSync.Revision)
 	} else {
 		// This can happen if SET and DELETE transactions are out of order.
 		// Record the delete anyway.
-		cache.items[kvSync.Key] = &keyValueCacheItem{
-			revision:         kvSync.Revision,
-			modificationTime: time.Now(),
-			deleted:          true,
-		}
+		cacheItem = &keyValueCacheItem{}
+		cache.items[kvSync.Key] = cacheItem
 	}
 
-	return nil
+	// Mark item as deleted.
+	cacheItem.revision = kvSync.Revision
+	cacheItem.modificationTime = time.Now()
+	cacheItem.deleted = true
+	logInfo("[keyValueCache] deleted key '%s' (new rev %d)", kvSync.Key, kvSync.Revision)
+
+	if keyValueDeletedCallback != nil {
+		go keyValueDeletedCallback(cache.dc, kvSync.Key)
+	}
 }
 
 func (cache *keyValueCache) handleSync(kvSync *keyValueSync) {
 	switch kvSync.Action {
 	case kvSyncActionReload:
-		if err := cache.syncReload(kvSync); err == nil {
-			// callback
-		}
-
+		cache.syncReload(kvSync)
 	case kvSyncActionSet:
-		if err := cache.syncSet(kvSync); err == nil {
-			// callback
-		}
-
+		cache.syncSet(kvSync)
 	case kvSyncActionDelete:
-		if err := cache.syncDelete(kvSync); err == nil {
-			// callback
-		}
-
+		cache.syncDelete(kvSync)
 	default:
 		logError("[keyValueCache] received sync message with unknown action '%s'", kvSync.Action)
 	}
@@ -178,7 +173,7 @@ func (cache *keyValueCache) getKeyValue(key string) (*KeyValue, error) {
 
 	cache.access <- func() {
 		if !cache.initialized {
-			resErr <- ErrCacheNotReady
+			resErr <- ErrorCacheNotReady
 			return
 		}
 
@@ -191,7 +186,7 @@ func (cache *keyValueCache) getKeyValue(key string) (*KeyValue, error) {
 			return
 		}
 
-		resErr <- ErrKeyNotFound
+		resErr <- ErrorKeyNotFound
 	}
 
 	select {
@@ -199,5 +194,46 @@ func (cache *keyValueCache) getKeyValue(key string) (*KeyValue, error) {
 		return nil, err
 	case kv := <-resKV:
 		return kv, nil
+	}
+}
+
+func (cache *keyValueCache) getAllKeyValues() ([]*KeyValue, error) {
+	resErr := make(chan error)
+	resKV := make(chan *KeyValue)
+
+	cache.access <- func() {
+		if !cache.initialized {
+			resErr <- ErrorCacheNotReady
+			return
+		}
+
+		for key, cacheItem := range cache.items {
+			if cacheItem.deleted {
+				continue
+			}
+
+			resKV <- &KeyValue{
+				Key:              key,
+				Value:            cacheItem.value,
+				ModificationTime: cacheItem.modificationTime,
+			}
+		}
+
+		close(resKV)
+	}
+
+	res := make([]*KeyValue, 0, 10)
+
+	for {
+		select {
+		case err := <-resErr:
+			return nil, err
+		case kv := <-resKV:
+			if kv == nil {
+				return res, nil
+			}
+
+			res = append(res, kv)
+		}
 	}
 }

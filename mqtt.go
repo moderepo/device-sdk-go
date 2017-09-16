@@ -49,7 +49,7 @@ type (
 )
 
 func (mc *mqttConn) close() {
-	close(mc.stopPublisher) // tell uptream processor to quit
+	close(mc.stopPublisher) // tell publisher to quit
 	close(mc.doPing)        // tell pinger to quit
 
 	mc.wgWrite.Wait() // wait for event processor and pinger to finish
