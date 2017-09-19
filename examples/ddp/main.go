@@ -39,8 +39,7 @@ func main() {
 		}
 	})
 
-	// Start connection session using MQTT.
-	if err := mode.StartSession(dc, true); err != nil {
+	if err := mode.StartSession(dc); err != nil {
 		fmt.Printf("Failed to start session: %v\n", err)
 		os.Exit(1)
 	}

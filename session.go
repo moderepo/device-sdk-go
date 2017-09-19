@@ -7,7 +7,6 @@ import (
 )
 
 type (
-	// Connection can be either websocket or MQTT connection.
 	connection interface {
 		close()
 		getErrorChan() chan error
@@ -15,17 +14,15 @@ type (
 	}
 
 	session struct {
-		dc        *DeviceContext
-		usingMQTT bool
-		conn      connection
-		cmdQueue  chan *DeviceCommand
-		evtQueue  chan *DeviceEvent
-		kvCache   *keyValueCache
+		dc       *DeviceContext
+		conn     connection
+		cmdQueue chan *DeviceCommand
+		evtQueue chan *DeviceEvent
+		kvCache  *keyValueCache
 	}
 
 	sessCtrlStart struct {
 		dc       *DeviceContext
-		useMQTT  bool
 		response chan error
 	}
 
@@ -195,28 +192,19 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 	sessPingTimeout = timeout
 }
 
-func initSession(dc *DeviceContext, useMQTT bool) error {
+func initSession(dc *DeviceContext) error {
 	sess = &session{
-		dc:        dc,
-		usingMQTT: useMQTT,
-		cmdQueue:  make(chan *DeviceCommand, commandQueueLength),
-		evtQueue:  make(chan *DeviceEvent, eventQueueLength),
-		kvCache:   newKeyValueCache(dc),
+		dc:       dc,
+		cmdQueue: make(chan *DeviceCommand, commandQueueLength),
+		evtQueue: make(chan *DeviceEvent, eventQueueLength),
+		kvCache:  newKeyValueCache(dc),
 	}
 
 	sess.startCommandProcessor()
 	go sess.kvCache.run()
 
-	var conn connection
-	var err error
-
-	if useMQTT {
-		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
-	} else {
-		logInfo("[Session] opening websocket connection...")
-		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
-	}
+	logInfo("[Session] opening MQTT connection...")
+	conn, err := dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -269,16 +257,8 @@ func (s *session) reconnect() error {
 		return errors.New("already connected")
 	}
 
-	var conn connection
-	var err error
-
-	if s.usingMQTT {
-		logInfo("[Session] opening MQTT connection...")
-		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
-	} else {
-		logInfo("[Session] opening websocket connection...")
-		conn, err = s.dc.openWebsocket(s.cmdQueue, s.evtQueue)
-	}
+	logInfo("[Session] opening MQTT connection...")
+	conn, err := s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -350,7 +330,7 @@ func sessionIdleLoop() {
 	for {
 		select {
 		case c := <-sessCtrl.start:
-			if err := initSession(c.dc, c.useMQTT); err == nil {
+			if err := initSession(c.dc); err == nil {
 				sessState = SessionActive
 			} else {
 				logError("[SessionManager] connection error: %s", err.Error())
@@ -484,15 +464,11 @@ func runSessionManager() {
 }
 
 // StartSession starts a device connection session for the specified device.
-// By default, the connection is made using HTTP/websocket. If useMQTT is true,
-// the session will connect by MQTT instead
-//
 // You can only have one session at a time. If you call StartSession again
 // after a session has started, an error will be returned.
-func StartSession(dc *DeviceContext, useMQTT bool) error {
+func StartSession(dc *DeviceContext) error {
 	ctrl := &sessCtrlStart{
 		dc:       dc,
-		useMQTT:  useMQTT,
 		response: make(chan error, 1),
 	}
 
