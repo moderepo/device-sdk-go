@@ -7,7 +7,6 @@ import (
 )
 
 type (
-	// Connection can be either websocket or MQTT connection.
 	connection interface {
 		close()
 		getErrorChan() chan error
@@ -15,16 +14,15 @@ type (
 	}
 
 	session struct {
-		dc        *DeviceContext
-		usingMQTT bool
-		conn      connection
-		cmdQueue  chan *DeviceCommand
-		evtQueue  chan *DeviceEvent
+		dc       *DeviceContext
+		conn     connection
+		cmdQueue chan *DeviceCommand
+		evtQueue chan *DeviceEvent
+		kvCache  *keyValueCache
 	}
 
 	sessCtrlStart struct {
 		dc       *DeviceContext
-		useMQTT  bool
 		response chan error
 	}
 
@@ -41,12 +39,29 @@ type (
 		response chan error
 	}
 
+	kvAction int
+
+	sessCtrlAccessKV struct {
+		action      kvAction
+		key         string
+		value       interface{}
+		responseKV  chan *KeyValue
+		responseErr chan error
+	}
+
 	// SessionState represents a state of the device's connection session.
 	SessionState int
 
 	// A callback function that is invoked when the device's connection session
 	// changes state.
 	SessionStateCallback func(SessionState)
+)
+
+const (
+	kvActionGet kvAction = iota
+	kvActionGetAll
+	kvActionSet
+	kvActionDelete
 )
 
 const (
@@ -75,6 +90,7 @@ var (
 		stop      chan *sessCtrlStop
 		getState  chan *sessCtrlGetState
 		sendEvent chan *sessCtrlSendEvent
+		accessKV  chan *sessCtrlAccessKV
 		ping      <-chan time.Time
 	}
 
@@ -85,12 +101,18 @@ var (
 
 	sessStateCallback SessionStateCallback
 
-	ErrorSessionAlreadyStarted = errors.New("session already started")
-	ErrorSessionNotStarted     = errors.New("not in session")
-	ErrorSessionRecovering     = errors.New("session is recovering")
+	keyValuesReadyCallback  KeyValuesReadyCallback
+	keyValueStoredCallback  KeyValueStoredCallback
+	keyValueDeletedCallback KeyValueDeletedCallback
 
 	sessPingInterval = sessDefaultPingInterval
 	sessPingTimeout  = sessDefaultPingTimeout
+)
+
+var (
+	ErrorSessionAlreadyStarted = errors.New("session already started")
+	ErrorSessionNotStarted     = errors.New("not in session")
+	ErrorSessionRecovering     = errors.New("session is recovering")
 )
 
 func init() {
@@ -98,6 +120,7 @@ func init() {
 	sessCtrl.stop = make(chan *sessCtrlStop, 1)
 	sessCtrl.getState = make(chan *sessCtrlGetState, 1)
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
+	sessCtrl.accessKV = make(chan *sessCtrlAccessKV, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
 	go runSessionManager()
@@ -130,6 +153,36 @@ func SetSessionStateCallback(f SessionStateCallback) {
 	sessStateCallback = f
 }
 
+// SetKeyValuesReadyCallback designates a function to be called when the Device
+// Data Proxy is ready to be accessed.
+//
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
+func SetKeyValuesReadyCallback(f KeyValuesReadyCallback) {
+	keyValuesReadyCallback = f
+}
+
+// SetKeyValueStoredCallback designates a function to be called whenever a
+// key-value pair has been added or updated by someone else.
+//
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
+func SetKeyValueStoredCallback(f KeyValueStoredCallback) {
+	keyValueStoredCallback = f
+}
+
+// SetKeyValueDeletedCallback designates a function to be called whenever a
+// key-value pair has been deleted by someone else.
+//
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
+func SetKeyValueDeletedCallback(f KeyValueDeletedCallback) {
+	keyValueDeletedCallback = f
+}
+
 // When the device's connection session is in the "active" state, "pings"
 // are periodically sent to the server. A ping fails if the server doesn't
 // respond. ConfigurePings overrides the default time interval between pings and
@@ -139,24 +192,19 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 	sessPingTimeout = timeout
 }
 
-func initSession(dc *DeviceContext, useMQTT bool) error {
+func initSession(dc *DeviceContext) error {
 	sess = &session{
-		dc:        dc,
-		usingMQTT: useMQTT,
-		cmdQueue:  make(chan *DeviceCommand, commandQueueLength),
-		evtQueue:  make(chan *DeviceEvent, eventQueueLength),
+		dc:       dc,
+		cmdQueue: make(chan *DeviceCommand, commandQueueLength),
+		evtQueue: make(chan *DeviceEvent, eventQueueLength),
+		kvCache:  newKeyValueCache(dc),
 	}
 
-	var conn connection
-	var err error
+	sess.startCommandProcessor()
+	go sess.kvCache.run()
 
-	if useMQTT {
-		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue)
-	} else {
-		logInfo("[Session] opening websocket connection...")
-		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
-	}
+	logInfo("[Session] opening MQTT connection...")
+	conn, err := dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -185,6 +233,8 @@ func (s *session) terminate() {
 		close(s.evtQueue)
 		s.evtQueue = nil
 	}
+
+	s.kvCache.terminate()
 }
 
 func (s *session) disconnect() {
@@ -196,6 +246,10 @@ func (s *session) disconnect() {
 	if n := len(s.evtQueue); n > 0 {
 		logInfo("[Session] pending events in queue: %d", n)
 	}
+
+	if n := len(s.kvCache.pushQueue); n > 0 {
+		logInfo("[Session] pending key-value updates in queue: %d", n)
+	}
 }
 
 func (s *session) reconnect() error {
@@ -203,16 +257,8 @@ func (s *session) reconnect() error {
 		return errors.New("already connected")
 	}
 
-	var conn connection
-	var err error
-
-	if s.usingMQTT {
-		logInfo("[Session] opening MQTT connection...")
-		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue)
-	} else {
-		logInfo("[Session] opening websocket connection...")
-		conn, err = s.dc.openWebsocket(s.cmdQueue, s.evtQueue)
-	}
+	logInfo("[Session] opening MQTT connection...")
+	conn, err := s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -238,6 +284,45 @@ func (s *session) startCommandProcessor() {
 	}()
 }
 
+func handleKVAccess(c *sessCtrlAccessKV, allowReadOnly bool) {
+	switch c.action {
+	case kvActionGet:
+		if kv, err := sess.kvCache.getKeyValue(c.key); err == nil {
+			c.responseKV <- kv
+		} else {
+			c.responseErr <- err
+		}
+
+	case kvActionGetAll:
+		if kvs, err := sess.kvCache.getAllKeyValues(); err == nil {
+			for _, kv := range kvs {
+				c.responseKV <- kv
+			}
+			close(c.responseKV)
+		} else {
+			c.responseErr <- err
+		}
+
+	case kvActionSet:
+		if allowReadOnly {
+			c.responseErr <- ErrorSessionRecovering
+		} else if err := sess.kvCache.setKeyValue(c.key, c.value); err == nil {
+			c.responseErr <- nil
+		} else {
+			c.responseErr <- err
+		}
+
+	case kvActionDelete:
+		if allowReadOnly {
+			c.responseErr <- ErrorSessionRecovering
+		} else if err := sess.kvCache.deleteKeyValue(c.key); err == nil {
+			c.responseErr <- nil
+		} else {
+			c.responseErr <- err
+		}
+	}
+}
+
 func sessionIdleLoop() {
 	logInfo("[SessionManager] entering idle loop")
 	defer logInfo("[SessionManager] exiting idle loop")
@@ -245,11 +330,10 @@ func sessionIdleLoop() {
 	for {
 		select {
 		case c := <-sessCtrl.start:
-			if err := initSession(c.dc, c.useMQTT); err == nil {
-				sess.startCommandProcessor()
+			if err := initSession(c.dc); err == nil {
 				sessState = SessionActive
 			} else {
-				logError("[SessionManager] session not started: %s", err.Error())
+				logError("[SessionManager] connection error: %s", err.Error())
 				sessState = SessionRecovering
 			}
 
@@ -261,6 +345,9 @@ func sessionIdleLoop() {
 
 		case c := <-sessCtrl.getState:
 			c.response <- SessionIdle
+
+		case c := <-sessCtrl.accessKV:
+			c.responseErr <- ErrorSessionNotStarted
 
 		case c := <-sessCtrl.sendEvent:
 			c.response <- ErrorSessionNotStarted
@@ -295,6 +382,9 @@ func sessionActiveLoop() {
 		case c := <-sessCtrl.sendEvent:
 			sess.evtQueue <- c.event
 			c.response <- nil
+
+		case c := <-sessCtrl.accessKV:
+			handleKVAccess(c, false)
 
 		case <-sessCtrl.ping:
 			sess.conn.ping(sessPingTimeout)
@@ -345,6 +435,9 @@ func sessionRecoveringLoop() {
 
 		case c := <-sessCtrl.sendEvent:
 			c.response <- ErrorSessionRecovering
+
+		case c := <-sessCtrl.accessKV:
+			handleKVAccess(c, true)
 		}
 	}
 }
@@ -371,15 +464,11 @@ func runSessionManager() {
 }
 
 // StartSession starts a device connection session for the specified device.
-// By default, the connection is made using HTTP/websocket. If useMQTT is true,
-// the session will connect by MQTT instead
-//
 // You can only have one session at a time. If you call StartSession again
 // after a session has started, an error will be returned.
-func StartSession(dc *DeviceContext, useMQTT bool) error {
+func StartSession(dc *DeviceContext) error {
 	ctrl := &sessCtrlStart{
 		dc:       dc,
-		useMQTT:  useMQTT,
 		response: make(chan error, 1),
 	}
 
@@ -419,6 +508,105 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 
 	sessCtrl.sendEvent <- ctrl
 	return <-ctrl.response
+}
+
+// GetKeyValue looks up a key-value pair from the Device Data Proxy.
+// It returns an error if the device connection session is in idle state.
+// When the session is in recovery state, the key-value pair returned will
+// contain the last known value in the local memory cache.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func GetKeyValue(key string) (*KeyValue, error) {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionGet,
+		key:         key,
+		responseErr: make(chan error, 1),
+		responseKV:  make(chan *KeyValue, 1),
+	}
+
+	sessCtrl.accessKV <- ctrl
+
+	select {
+	case err := <-ctrl.responseErr:
+		return nil, err
+	case kv := <-ctrl.responseKV:
+		return kv, nil
+	}
+}
+
+// GetAllKeyValues returns all key-value pairs stored in the Device Data Proxy.
+// It returns an error if the device connection session is in idle state.
+// When the session is in recovery state, the key-value pairs returned will
+// contain the last known values in the local memory cache.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func GetAllKeyValues() ([]*KeyValue, error) {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionGetAll,
+		responseErr: make(chan error, 1),
+		responseKV:  make(chan *KeyValue, 1),
+	}
+
+	sessCtrl.accessKV <- ctrl
+	res := make([]*KeyValue, 0, 10)
+
+	for {
+		select {
+		case err := <-ctrl.responseErr:
+			return nil, err
+		case kv := <-ctrl.responseKV:
+			if kv == nil {
+				return res, nil
+			}
+
+			res = append(res, kv)
+		}
+	}
+}
+
+// SetKeyValue stores a key-value pair to the Device Data Proxy.
+// It returns an error if the device connection session is in idle or recovery state.
+//
+// IMPORTANT: Race condition may arise if both the device and someone else are
+// updating the same key-value pair.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func SetKeyValue(key string, value interface{}) error {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionSet,
+		key:         key,
+		value:       value,
+		responseErr: make(chan error, 1),
+	}
+
+	sessCtrl.accessKV <- ctrl
+	return <-ctrl.responseErr
+}
+
+// DeleteKeyValue deletes a key-value pair from the Device Data Proxy.
+// It returns an error if the device connection session is in idle or recovery state.
+//
+// IMPORTANT: Race condition may arise if both the device and someone else are
+// updating the same key-value pair.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func DeleteKeyValue(key string) error {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionDelete,
+		key:         key,
+		responseErr: make(chan error, 1),
+	}
+
+	sessCtrl.accessKV <- ctrl
+	return <-ctrl.responseErr
 }
 
 func (s SessionState) String() string {

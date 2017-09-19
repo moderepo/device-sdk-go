@@ -54,8 +54,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start connection session using websocket.
-	if err := mode.StartSession(dc, false); err != nil {
+	if err := mode.StartSession(dc); err != nil {
 		fmt.Printf("Failed to start session: %s\n", err.Error())
 		os.Exit(1)
 	}

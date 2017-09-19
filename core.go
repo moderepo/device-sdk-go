@@ -2,11 +2,11 @@
 This package provides a Go API for devices to interact with the MODE cloud.
 
 If a device wants to receive commands from and send events to the MODE cloud,
-it must start a connection session. You can choose to connect via HTTP/websocket
-or MQTT.
+it must start a connection session. Connection session is also required for the
+device to use the Deivce Data Proxy (device key-value store) feature.
 
-Both incoming commands and outgoing events are queued. If the websocket or MQTT
-connection is disrupted, commands already in the queue will be processed. Likewise,
+Both incoming commands and outgoing events are queued. If the connection is
+disrupted, commands already in the queue will be processed. Likewise,
 events already in the queue will be delivered when the connection resumes.
 */
 package mode
@@ -52,12 +52,20 @@ var (
 	infoLogger  = log.New(os.Stdout, "[MODE - INFO] ", log.LstdFlags)
 	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
 
+	// For publishing device events to cloud.
 	maxDeviceEventAttempts   uint = 3
 	deviceEventRetryInterval      = time.Second * 5
 
+	// For publishing key-value events to cloud.
+	maxKeyValueUpdateAttempts   uint = 3
+	keyValueUpdateRetryInterval      = time.Second * 5
+
 	// TBD: how much buffering should we allow?
-	eventQueueLength   = 128
-	commandQueueLength = 128
+	eventQueueLength            = 128
+	commandQueueLength          = 128
+	keyValueSyncQueueLength     = 128
+	keyValuePushQueueLength     = 128
+	keyValueCallbackQueueLength = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies
@@ -136,6 +144,25 @@ type (
 
 	// A callback function that handles a device command.
 	CommandHandler func(*DeviceContext, *DeviceCommand)
+
+	// KeyValue represents a key-value pair stored in the Device Data Proxy.
+	KeyValue struct {
+		Key              string      `json:"key"`
+		Value            interface{} `json:"value"`
+		ModificationTime time.Time   `json:"modificationTime"`
+	}
+
+	// A callback function that is invoked when the Device Data Proxy is ready
+	// to be accessed.
+	KeyValuesReadyCallback func(*DeviceContext)
+
+	// A callback function that is invoked when a key-value pair has been added
+	// or updated.
+	KeyValueStoredCallback func(*DeviceContext, *KeyValue)
+
+	// A callback function that is invoked when a key-value pair has been deleted.
+	// The key of the deleted key-value is passed in the argument.
+	KeyValueDeletedCallback func(*DeviceContext, string)
 )
 
 // ProvisionDevice is used for on-demand device provisioning. It takes a
@@ -179,11 +206,7 @@ func (dc *DeviceContext) EnableClaimMode(duration time.Duration) error {
 	params.Claimable = true
 	params.Duration = uint64(duration / time.Second)
 
-	if err := makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil); err != nil {
-		return err
-	}
-
-	return nil
+	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
 }
 
 // DisableClaimMode turns off the device's "claim mode", disallowing it to be added
@@ -197,11 +220,7 @@ func (dc *DeviceContext) DisableClaimMode() error {
 	params.DeviceID = dc.DeviceID
 	params.Claimable = false
 
-	if err := makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil); err != nil {
-		return err
-	}
-
-	return nil
+	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
 }
 
 // GetInfo fetches the device's information from MODE.
@@ -220,6 +239,10 @@ func (cmd *DeviceCommand) String() string {
 	} else {
 		return fmt.Sprintf("{Action:\"%s\", Parameters:%s}", cmd.Action, string(cmd.payload))
 	}
+}
+
+func (kv *KeyValue) String() string {
+	return fmt.Sprintf("{Key:\"%s\", Value:%v, LastModified:%s}", kv.Key, kv.Value, kv.ModificationTime.Format(time.RFC3339))
 }
 
 // A special JSON decoder that makes sure numbers in command parameters
