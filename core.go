@@ -52,17 +52,20 @@ var (
 	infoLogger  = log.New(os.Stdout, "[MODE - INFO] ", log.LstdFlags)
 	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
 
+	// For publishing device events to cloud.
 	maxDeviceEventAttempts   uint = 3
 	deviceEventRetryInterval      = time.Second * 5
 
+	// For publishing key-value events to cloud.
 	maxKeyValueUpdateAttempts   uint = 3
 	keyValueUpdateRetryInterval      = time.Second * 5
 
 	// TBD: how much buffering should we allow?
-	eventQueueLength        = 128
-	commandQueueLength      = 128
-	keyValueSyncQueueLength = 128
-	keyValuePushQueueLength = 128
+	eventQueueLength            = 128
+	commandQueueLength          = 128
+	keyValueSyncQueueLength     = 128
+	keyValuePushQueueLength     = 128
+	keyValueCallbackQueueLength = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies

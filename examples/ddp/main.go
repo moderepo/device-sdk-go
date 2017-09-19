@@ -29,19 +29,19 @@ func main() {
 	})
 
 	mode.SetKeyValueStoredCallback(func(_ *mode.DeviceContext, kv *mode.KeyValue) {
-		// If the key 'msg' is updated, echo it back to the key 'echo'.
+		// If the key 'msg' is updated, emit a device event.
 		if kv.Key == "msg" {
-			fmt.Printf("Echoing msg %v\n", kv.Value)
+			eventData := map[string]interface{}{"msg": kv.Value}
 
-			if err := mode.SetKeyValue("echo", kv.Value); err != nil {
-				fmt.Printf("Failed to set key-value: %s\n", err.Error())
+			if err := mode.SendEvent("msgUpdated", eventData, mode.QOSAtLeastOnce); err != nil {
+				fmt.Printf("Failed to send event: %v\n", err)
 			}
 		}
 	})
 
 	// Start connection session using MQTT.
 	if err := mode.StartSession(dc, true); err != nil {
-		fmt.Printf("Failed to start session: %s\n", err.Error())
+		fmt.Printf("Failed to start session: %v\n", err)
 		os.Exit(1)
 	}
 

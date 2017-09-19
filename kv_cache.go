@@ -23,12 +23,13 @@ type (
 	}
 
 	keyValueCache struct {
-		dc          *DeviceContext
-		initialized bool
-		items       map[string]*keyValueCacheItem
-		syncQueue   chan *keyValueSync // for pulling changes from cloud
-		pushQueue   chan *keyValueSync // for pushing changes to cloud
-		access      chan func()
+		dc            *DeviceContext
+		initialized   bool
+		items         map[string]*keyValueCacheItem
+		syncQueue     chan *keyValueSync // for pulling changes from cloud
+		pushQueue     chan *keyValueSync // for pushing changes to cloud
+		callbackQueue chan func()
+		access        chan func()
 	}
 )
 
@@ -45,16 +46,19 @@ var (
 
 func newKeyValueCache(dc *DeviceContext) *keyValueCache {
 	return &keyValueCache{
-		dc:        dc,
-		syncQueue: make(chan *keyValueSync, keyValueSyncQueueLength),
-		pushQueue: make(chan *keyValueSync, keyValuePushQueueLength),
-		access:    make(chan func()),
+		dc:            dc,
+		syncQueue:     make(chan *keyValueSync, keyValueSyncQueueLength),
+		pushQueue:     make(chan *keyValueSync, keyValuePushQueueLength),
+		callbackQueue: make(chan func(), keyValueCallbackQueueLength),
+		access:        make(chan func()),
 	}
 }
 
 func (cache *keyValueCache) run() {
-	logInfo("[keyValueCache] starting processing loop")
+	logInfo("[keyValueCache] entering processing loop")
 	defer logInfo("[keyValueCache] exiting processing loop")
+
+	go cache.execCallbacks()
 
 	for {
 		select {
@@ -71,6 +75,15 @@ func (cache *keyValueCache) run() {
 	}
 }
 
+func (cache *keyValueCache) execCallbacks() {
+	logInfo("[keyValueCache] entering callbacks loop")
+	defer logInfo("[keyValueCache] exiting callbacks loop")
+
+	for f := range cache.callbackQueue {
+		f()
+	}
+}
+
 func (cache *keyValueCache) terminate() {
 	if cache.syncQueue != nil {
 		close(cache.syncQueue)
@@ -80,6 +93,11 @@ func (cache *keyValueCache) terminate() {
 	if cache.pushQueue != nil {
 		close(cache.pushQueue)
 		cache.pushQueue = nil
+	}
+
+	if cache.callbackQueue != nil {
+		close(cache.callbackQueue)
+		cache.callbackQueue = nil
 	}
 }
 
@@ -99,7 +117,9 @@ func (cache *keyValueCache) syncReload(kvSync *keyValueSync) {
 	cache.initialized = true
 
 	if keyValuesReadyCallback != nil {
-		go keyValuesReadyCallback(cache.dc)
+		cache.callbackQueue <- func() {
+			keyValuesReadyCallback(cache.dc)
+		}
 	}
 }
 
@@ -127,7 +147,9 @@ func (cache *keyValueCache) syncSet(kvSync *keyValueSync) {
 	logInfo("[keyValueCache] saved key '%s' (new rev %d)", kvSync.Key, kvSync.Revision)
 
 	if keyValueStoredCallback != nil {
-		go keyValueStoredCallback(cache.dc, &KeyValue{Key: kvSync.Key, Value: kvSync.Value, ModificationTime: cacheItem.modificationTime})
+		cache.callbackQueue <- func() {
+			keyValueStoredCallback(cache.dc, &KeyValue{Key: kvSync.Key, Value: kvSync.Value, ModificationTime: cacheItem.modificationTime})
+		}
 	}
 }
 
@@ -157,7 +179,9 @@ func (cache *keyValueCache) syncDelete(kvSync *keyValueSync) {
 	logInfo("[keyValueCache] deleted key '%s' (new rev %d)", kvSync.Key, kvSync.Revision)
 
 	if keyValueDeletedCallback != nil {
-		go keyValueDeletedCallback(cache.dc, kvSync.Key)
+		cache.callbackQueue <- func() {
+			keyValueDeletedCallback(cache.dc, kvSync.Key)
+		}
 	}
 }
 

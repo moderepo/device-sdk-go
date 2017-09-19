@@ -1,7 +1,6 @@
 package mode
 
 import (
-	//	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -160,8 +159,9 @@ func SetSessionStateCallback(f SessionStateCallback) {
 // SetKeyValuesReadyCallback designates a function to be called when the Device
 // Data Proxy is ready to be accessed.
 //
-// IMPORTANT: This callback function runs in a separate goroutine. Please take
-// care to handle any concurrency issues.
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
 func SetKeyValuesReadyCallback(f KeyValuesReadyCallback) {
 	keyValuesReadyCallback = f
 }
@@ -169,8 +169,9 @@ func SetKeyValuesReadyCallback(f KeyValuesReadyCallback) {
 // SetKeyValueStoredCallback designates a function to be called whenever a
 // key-value pair has been added or updated by someone else.
 //
-// IMPORTANT: This callback function runs in a separate goroutine. Please take
-// care to handle any concurrency issues.
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
 func SetKeyValueStoredCallback(f KeyValueStoredCallback) {
 	keyValueStoredCallback = f
 }
@@ -178,8 +179,9 @@ func SetKeyValueStoredCallback(f KeyValueStoredCallback) {
 // SetKeyValueDeletedCallback designates a function to be called whenever a
 // key-value pair has been deleted by someone else.
 //
-// IMPORTANT: This callback function runs in a separate goroutine. Please take
-// care to handle any concurrency issues.
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
 func SetKeyValueDeletedCallback(f KeyValueDeletedCallback) {
 	keyValueDeletedCallback = f
 }
