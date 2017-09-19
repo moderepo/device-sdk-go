@@ -52,15 +52,20 @@ var (
 	infoLogger  = log.New(os.Stdout, "[MODE - INFO] ", log.LstdFlags)
 	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
 
-	maxDeviceEventAttempts      uint = 3
-	maxDeviceKeyValueAttempts   uint = 3
-	deviceEventRetryInterval         = time.Second * 5
-	deviceKeyValueRetryInterval      = time.Second * 5
+	// For publishing device events to cloud.
+	maxDeviceEventAttempts   uint = 3
+	deviceEventRetryInterval      = time.Second * 5
+
+	// For publishing key-value events to cloud.
+	maxKeyValueUpdateAttempts   uint = 3
+	keyValueUpdateRetryInterval      = time.Second * 5
 
 	// TBD: how much buffering should we allow?
-	eventQueueLength    = 128
-	keyValueQueueLength = 128
-	commandQueueLength  = 128
+	eventQueueLength            = 128
+	commandQueueLength          = 128
+	keyValueSyncQueueLength     = 128
+	keyValuePushQueueLength     = 128
+	keyValueCallbackQueueLength = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies
@@ -137,27 +142,27 @@ type (
 		qos       QOSLevel               // not exported to JSON
 	}
 
-	ActionKeyValue struct {
-		Action  string                 `json:"action"`
-		Key     string                 `json:"key"`
-		Value   map[string]interface{} `json:"value"`
-		Rev     int                    `json:"rev"`
-		Items   []interface{}          `json:"items"`
-		MTime   time.Time              `json:"mtime"`
-		Payload []byte
-	}
-
-	KeyValue struct {
-		Key   string                 `json:"key"`
-		Value map[string]interface{} `json:"value"`
-	}
-
 	// A callback function that handles a device command.
 	CommandHandler func(*DeviceContext, *DeviceCommand)
 
-	KvReloadHandler func(*DeviceContext, []*KeyValue) bool
-	KvSetHandler    func(*DeviceContext, *KeyValue) bool
-	KvDeleteHandler func(*DeviceContext, string) bool
+	// KeyValue represents a key-value pair stored in the Device Data Proxy.
+	KeyValue struct {
+		Key              string      `json:"key"`
+		Value            interface{} `json:"value"`
+		ModificationTime time.Time   `json:"modificationTime"`
+	}
+
+	// A callback function that is invoked when the Device Data Proxy is ready
+	// to be accessed.
+	KeyValuesReadyCallback func(*DeviceContext)
+
+	// A callback function that is invoked when a key-value pair has been added
+	// or updated.
+	KeyValueStoredCallback func(*DeviceContext, *KeyValue)
+
+	// A callback function that is invoked when a key-value pair has been deleted.
+	// The key of the deleted key-value is passed in the argument.
+	KeyValueDeletedCallback func(*DeviceContext, string)
 )
 
 // ProvisionDevice is used for on-demand device provisioning. It takes a
@@ -234,6 +239,10 @@ func (cmd *DeviceCommand) String() string {
 	} else {
 		return fmt.Sprintf("{Action:\"%s\", Parameters:%s}", cmd.Action, string(cmd.payload))
 	}
+}
+
+func (kv *KeyValue) String() string {
+	return fmt.Sprintf("{Key:\"%s\", Value:%v, LastModified:%s}", kv.Key, kv.Value, kv.ModificationTime.Format(time.RFC3339))
 }
 
 // A special JSON decoder that makes sure numbers in command parameters

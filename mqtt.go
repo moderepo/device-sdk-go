@@ -35,21 +35,21 @@ type (
 		subs          map[string]mqttSubscription
 		command       chan<- *DeviceCommand
 		event         <-chan *DeviceEvent
-		recvKeyValue  chan<- *ActionKeyValue
-		sendKeyValue  <-chan *ActionKeyValue
+		kvSync        chan<- *keyValueSync
+		kvPush        <-chan *keyValueSync
 		err           chan error
 		doPing        chan time.Duration
 		outPacket     chan packet.Packet
 		puback        chan *packet.PubackPacket
 		pingresp      chan *packet.PingrespPacket
-		stopEventProc chan bool
+		stopPublisher chan bool
 		wgWrite       sync.WaitGroup
 		wgRead        sync.WaitGroup
 	}
 )
 
 func (mc *mqttConn) close() {
-	close(mc.stopEventProc) // tell event processor to quit
+	close(mc.stopPublisher) // tell publisher to quit
 	close(mc.doPing)        // tell pinger to quit
 
 	mc.wgWrite.Wait() // wait for event processor and pinger to finish
@@ -199,18 +199,17 @@ func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 }
 
 func (mc *mqttConn) handleKeyValueMsg(p *packet.PublishPacket) error {
-	var kv ActionKeyValue
-	if err := decodeOpaqueJSON(p.Message.Payload, &kv); err != nil {
-		return fmt.Errorf("message data is not valid key value JSON: %s", err.Error())
+	var kvSync keyValueSync
+
+	if err := decodeOpaqueJSON(p.Message.Payload, &kvSync); err != nil {
+		return fmt.Errorf("message data is not valid key-value sync JSON: %s", err.Error())
 	}
 
-	kv.Payload = p.Message.Payload
-
-	if kv.Action == "" {
-		return errors.New("message data is not valid command JSON: no action field")
+	if kvSync.Action == "" {
+		return errors.New("message data is not valid key-value sync JSON: no action field")
 	}
 
-	mc.recvKeyValue <- &kv
+	mc.kvSync <- &kvSync
 	return nil
 }
 
@@ -313,27 +312,28 @@ func (mc *mqttConn) runPinger() {
 	}
 }
 
-func (mc *mqttConn) runUpstreamProcessor() {
-	logInfo("[MQTT] event processor is running")
+func (mc *mqttConn) runPublisher() {
+	logInfo("[MQTT] publisher is running")
 	mc.wgWrite.Add(1)
 
 	defer func() {
-		logInfo("[MQTT] event processor is exiting")
+		logInfo("[MQTT] publisher is exiting")
 		mc.wgWrite.Done()
 	}()
 
 	for {
 		select {
-		case <-mc.stopEventProc:
+		case <-mc.stopPublisher:
 			return
 
 		case e := <-mc.event:
 			if err := mc.sendEvent(e); err != nil {
-				logError("[MQTT] failed to send event: %s", err.Error())
+				logError("[MQTT] publisher failed to send event: %s", err.Error())
 			}
-		case kv := <-mc.sendKeyValue:
-			if err := mc.setKeyValue(kv); err != nil {
-				logError("[MQTT] failed to set keyValue: %s", err.Error())
+
+		case kvSync := <-mc.kvPush:
+			if err := mc.sendKeyValueUpdate(kvSync); err != nil {
+				logError("[MQTT] publisher failed to send key-value update: %s", err.Error())
 			}
 		}
 	}
@@ -389,11 +389,12 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
-func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
+func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	// Always QoS1
 	qos := packet.QOSAtLeastOnce
 
-	payload, _ := json.Marshal(kv)
+	payload, _ := json.Marshal(kvSync)
+
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
 	p.Message = packet.Message{
@@ -402,15 +403,15 @@ func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
 		Payload: payload,
 	}
 
-	for count := uint(1); count <= maxDeviceKeyValueAttempts; count++ {
+	for count := uint(1); count <= maxKeyValueUpdateAttempts; count++ {
 		mc.outPacket <- p
 
-		logInfo("[MQTT] key value delivery attempt #%d for packet ID %d", count, p.PacketID)
+		logInfo("[MQTT] key-value update attempt #%d for packet ID %d", count, p.PacketID)
 		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
 
 		select {
-		case <-time.After(deviceKeyValueRetryInterval):
-			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, deviceKeyValueRetryInterval)
+		case <-time.After(keyValueUpdateRetryInterval):
+			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, keyValueUpdateRetryInterval)
 
 		case ack := <-mc.puback:
 			if ack.PacketID == p.PacketID {
@@ -423,10 +424,10 @@ func (mc *mqttConn) setKeyValue(kv *ActionKeyValue) error {
 		p.Dup = true
 	}
 
-	return errors.New("keyValue dropped")
+	return errors.New("key-value update dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, recvKvQueue chan<- *ActionKeyValue, kvQueue <-chan *ActionKeyValue) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -469,10 +470,10 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 
 	mc.command = cmdQueue
 	mc.event = evtQueue
-	mc.recvKeyValue = recvKvQueue
-	mc.sendKeyValue = kvQueue
+	mc.kvSync = kvSyncQueue
+	mc.kvPush = kvPushQueue
 	mc.doPing = make(chan time.Duration, 1)
-	mc.stopEventProc = make(chan bool)
+	mc.stopPublisher = make(chan bool)
 	mc.err = make(chan error, 10) // make sure this won't block
 	mc.outPacket = make(chan packet.Packet, 1)
 	mc.puback = make(chan *packet.PubackPacket, 1)
@@ -480,7 +481,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 
 	go mc.runPacketReader()
 	go mc.runPacketWriter()
-	go mc.runUpstreamProcessor()
+	go mc.runPublisher()
 	go mc.runPinger()
 
 	return mc, nil

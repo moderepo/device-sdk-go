@@ -1,7 +1,6 @@
 package mode
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -16,13 +15,12 @@ type (
 	}
 
 	session struct {
-		dc          *DeviceContext
-		usingMQTT   bool
-		conn        connection
-		cmdQueue    chan *DeviceCommand
-		evtQueue    chan *DeviceEvent
-		sendKvQueue chan *ActionKeyValue
-		recvKvQueue chan *ActionKeyValue
+		dc        *DeviceContext
+		usingMQTT bool
+		conn      connection
+		cmdQueue  chan *DeviceCommand
+		evtQueue  chan *DeviceEvent
+		kvCache   *keyValueCache
 	}
 
 	sessCtrlStart struct {
@@ -44,16 +42,14 @@ type (
 		response chan error
 	}
 
-	sessCtrlSendKeyValue struct {
-		keyValue *ActionKeyValue
-		response chan error
-	}
+	kvAction int
 
-	sessCtrlRecvKeyValue struct {
-		getAll     bool
-		key        string
-		responseKv []*ActionKeyValue
-		response   chan error
+	sessCtrlAccessKV struct {
+		action      kvAction
+		key         string
+		value       interface{}
+		responseKV  chan *KeyValue
+		responseErr chan error
 	}
 
 	// SessionState represents a state of the device's connection session.
@@ -62,6 +58,13 @@ type (
 	// A callback function that is invoked when the device's connection session
 	// changes state.
 	SessionStateCallback func(SessionState)
+)
+
+const (
+	kvActionGet kvAction = iota
+	kvActionGetAll
+	kvActionSet
+	kvActionDelete
 )
 
 const (
@@ -86,13 +89,12 @@ var (
 	sessState = SessionIdle
 
 	sessCtrl struct {
-		start        chan *sessCtrlStart
-		stop         chan *sessCtrlStop
-		getState     chan *sessCtrlGetState
-		sendEvent    chan *sessCtrlSendEvent
-		sendKeyValue chan *sessCtrlSendKeyValue
-		recvKeyValue chan *sessCtrlRecvKeyValue
-		ping         <-chan time.Time
+		start     chan *sessCtrlStart
+		stop      chan *sessCtrlStop
+		getState  chan *sessCtrlGetState
+		sendEvent chan *sessCtrlSendEvent
+		accessKV  chan *sessCtrlAccessKV
+		ping      <-chan time.Time
 	}
 
 	sess *session
@@ -102,17 +104,18 @@ var (
 
 	sessStateCallback SessionStateCallback
 
-	ErrorSessionAlreadyStarted = errors.New("session already started")
-	ErrorSessionNotStarted     = errors.New("not in session")
-	ErrorSessionRecovering     = errors.New("session is recovering")
+	keyValuesReadyCallback  KeyValuesReadyCallback
+	keyValueStoredCallback  KeyValueStoredCallback
+	keyValueDeletedCallback KeyValueDeletedCallback
 
 	sessPingInterval = sessDefaultPingInterval
 	sessPingTimeout  = sessDefaultPingTimeout
+)
 
-	kvReloadHandler KvReloadHandler
-	kvSetHandler    KvSetHandler
-	kvDeleteHandler KvDeleteHandler
-	kvStore         map[string]*ActionKeyValue
+var (
+	ErrorSessionAlreadyStarted = errors.New("session already started")
+	ErrorSessionNotStarted     = errors.New("not in session")
+	ErrorSessionRecovering     = errors.New("session is recovering")
 )
 
 func init() {
@@ -120,8 +123,7 @@ func init() {
 	sessCtrl.stop = make(chan *sessCtrlStop, 1)
 	sessCtrl.getState = make(chan *sessCtrlGetState, 1)
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
-	sessCtrl.sendKeyValue = make(chan *sessCtrlSendKeyValue, 1)
-	sessCtrl.recvKeyValue = make(chan *sessCtrlRecvKeyValue, 1)
+	sessCtrl.accessKV = make(chan *sessCtrlAccessKV, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
 	go runSessionManager()
@@ -154,16 +156,34 @@ func SetSessionStateCallback(f SessionStateCallback) {
 	sessStateCallback = f
 }
 
-func SetKvReloadHandler(h KvReloadHandler) {
-	kvReloadHandler = h
+// SetKeyValuesReadyCallback designates a function to be called when the Device
+// Data Proxy is ready to be accessed.
+//
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
+func SetKeyValuesReadyCallback(f KeyValuesReadyCallback) {
+	keyValuesReadyCallback = f
 }
 
-func SetKvSetHandler(h KvSetHandler) {
-	kvSetHandler = h
+// SetKeyValueStoredCallback designates a function to be called whenever a
+// key-value pair has been added or updated by someone else.
+//
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
+func SetKeyValueStoredCallback(f KeyValueStoredCallback) {
+	keyValueStoredCallback = f
 }
 
-func SetKvDeleteHandler(h KvDeleteHandler) {
-	kvDeleteHandler = h
+// SetKeyValueDeletedCallback designates a function to be called whenever a
+// key-value pair has been deleted by someone else.
+//
+// IMPORTANT: key-value callbacks are queued and executed serially by a goroutine.
+// In your callback function, you should decide whether to spawn goroutines to
+// do certain work.
+func SetKeyValueDeletedCallback(f KeyValueDeletedCallback) {
+	keyValueDeletedCallback = f
 }
 
 // When the device's connection session is in the "active" state, "pings"
@@ -177,20 +197,22 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 
 func initSession(dc *DeviceContext, useMQTT bool) error {
 	sess = &session{
-		dc:          dc,
-		usingMQTT:   useMQTT,
-		cmdQueue:    make(chan *DeviceCommand, commandQueueLength),
-		evtQueue:    make(chan *DeviceEvent, eventQueueLength),
-		sendKvQueue: make(chan *ActionKeyValue, eventQueueLength),
-		recvKvQueue: make(chan *ActionKeyValue, eventQueueLength),
+		dc:        dc,
+		usingMQTT: useMQTT,
+		cmdQueue:  make(chan *DeviceCommand, commandQueueLength),
+		evtQueue:  make(chan *DeviceEvent, eventQueueLength),
+		kvCache:   newKeyValueCache(dc),
 	}
+
+	sess.startCommandProcessor()
+	go sess.kvCache.run()
 
 	var conn connection
 	var err error
 
 	if useMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.recvKvQueue, sess.sendKvQueue)
+		conn, err = dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = dc.openWebsocket(sess.cmdQueue, sess.evtQueue)
@@ -224,15 +246,7 @@ func (s *session) terminate() {
 		s.evtQueue = nil
 	}
 
-	if s.sendKvQueue != nil {
-		close(s.sendKvQueue)
-		s.sendKvQueue = nil
-	}
-
-	if s.recvKvQueue != nil {
-		close(s.recvKvQueue)
-		s.recvKvQueue = nil
-	}
+	s.kvCache.terminate()
 }
 
 func (s *session) disconnect() {
@@ -245,8 +259,8 @@ func (s *session) disconnect() {
 		logInfo("[Session] pending events in queue: %d", n)
 	}
 
-	if n := len(s.sendKvQueue); n > 0 {
-		logInfo("[Session] pending key value set in queue: %d", n)
+	if n := len(s.kvCache.pushQueue); n > 0 {
+		logInfo("[Session] pending key-value updates in queue: %d", n)
 	}
 }
 
@@ -260,7 +274,7 @@ func (s *session) reconnect() error {
 
 	if s.usingMQTT {
 		logInfo("[Session] opening MQTT connection...")
-		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.recvKvQueue, s.sendKvQueue)
+		conn, err = s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
 	} else {
 		logInfo("[Session] opening websocket connection...")
 		conn, err = s.dc.openWebsocket(s.cmdQueue, s.evtQueue)
@@ -290,160 +304,43 @@ func (s *session) startCommandProcessor() {
 	}()
 }
 
-func (s *session) kvReload(rev int, items []interface{}) bool {
-	logInfo("[Session] kvReload Rev %d number of Items: %d", rev, len(items))
-
-	newKvStore := map[string]*ActionKeyValue{}
-
-	for _, i := range items {
-		item := i.(map[string]interface{})
-		key, ok := item["key"].(string)
-		if !ok {
-			logError("[Session] Failed to get key")
-			return false
+func handleKVAccess(c *sessCtrlAccessKV, allowReadOnly bool) {
+	switch c.action {
+	case kvActionGet:
+		if kv, err := sess.kvCache.getKeyValue(c.key); err == nil {
+			c.responseKV <- kv
+		} else {
+			c.responseErr <- err
 		}
-		value, ok := item["value"].(map[string]interface{})
-		if !ok {
-			logError("[Session] Failed to get value: key(%s)", key)
-			// TODO: assuming the value is always hash, but interface{} is better?
-			continue
-		}
-		mtime, err := time.Parse(time.RFC3339Nano, item["modificationTime"].(string))
-		if err != nil {
-			logError("[Session] Failed to parse modificationTime: key(%s)", key)
-			return false
-		}
-		kv := &ActionKeyValue{Rev: rev, Value: value, MTime: mtime}
-		newKvStore[key] = kv
-		logInfo("[Session] key: %s", key)
-	}
 
-	kvStore = newKvStore
-
-	return true
-}
-
-func (s *session) kvSet(rev int, key string, value map[string]interface{}) bool {
-	if len(key) == 0 {
-		logError("[Session] Invalid Key")
-		return false
-	}
-
-	if value == nil {
-		logError("[Session] Invalid value")
-		return false
-	}
-
-	stored, ok := kvStore[key]
-	if !ok {
-		kvStore[key] = &ActionKeyValue{Rev: rev, Value: value, MTime: time.Now()}
-		logInfo("[Session] kvSet saved new key %s (rev %d)", key, rev)
-		return true
-	}
-
-	if rev <= stored.Rev {
-		logInfo("[Session] kvSet ignored obsolete update (rev %d) to key %s (rev %d)", rev, key, stored.Rev)
-		return false
-	}
-
-	stored.Rev = rev
-	stored.Value = value
-	stored.MTime = time.Now()
-	logInfo("[Session] kvSet updated value of key %s (rev %d)", key, rev)
-
-	return true
-}
-
-func (s *session) kvDelete(rev int, key string) bool {
-	if len(key) == 0 {
-		logError("[Session] Invalid Key")
-		return false
-	}
-
-	stored, ok := kvStore[key]
-	if !ok {
-		// This can happen if SET and DELETE transactions are out of order.
-		// Record the delete anyway.
-		kvStore[key] = &ActionKeyValue{Rev: rev, MTime: time.Now()}
-
-		logInfo("[Session] kvDelete deleted value for key '%s' (rev %d)", key, rev)
-		return true
-	}
-
-	if rev <= stored.Rev {
-		logInfo("[Session] kvDelete ignored obsolete update (rev %d) to key %s (rev %d)", rev, key, key, stored.Rev)
-		return false
-	}
-
-	stored.Rev = rev
-	stored.Value = nil
-	stored.MTime = time.Now()
-	logInfo("[Session] kvDelete deleted value for key %s (rev %d)", key, rev)
-	return true
-}
-
-func (s *session) keyValueHandler(dc *DeviceContext, kv *ActionKeyValue) {
-
-	switch kv.Action {
-	case "reload":
-		if s.kvReload(kv.Rev, kv.Items) && kvReloadHandler != nil {
-			items := []*KeyValue{}
-			for _, item := range kv.Items {
-
-				buf, _ := json.Marshal(item)
-
-				var kv KeyValue
-				json.Unmarshal(buf, &kv)
-
-				items = append(items, &kv)
+	case kvActionGetAll:
+		if kvs, err := sess.kvCache.getAllKeyValues(); err == nil {
+			for _, kv := range kvs {
+				c.responseKV <- kv
 			}
-			kvReloadHandler(dc, items)
-		}
-	case "set":
-		if s.kvSet(kv.Rev, kv.Key, kv.Value) && kvSetHandler != nil {
-			kvSetHandler(dc, &KeyValue{Key: kv.Key, Value: kv.Value})
-		}
-	case "delete":
-		if s.kvDelete(kv.Rev, kv.Key) && kvDeleteHandler != nil {
-			kvDeleteHandler(dc, kv.Key)
+			close(c.responseKV)
+		} else {
+			c.responseErr <- err
 		}
 
-	default:
-		logError("[Session] received sync message with unknown action %s", kv.Action)
+	case kvActionSet:
+		if allowReadOnly {
+			c.responseErr <- ErrorSessionRecovering
+		} else if err := sess.kvCache.setKeyValue(c.key, c.value); err == nil {
+			c.responseErr <- nil
+		} else {
+			c.responseErr <- err
+		}
+
+	case kvActionDelete:
+		if allowReadOnly {
+			c.responseErr <- ErrorSessionRecovering
+		} else if err := sess.kvCache.deleteKeyValue(c.key); err == nil {
+			c.responseErr <- nil
+		} else {
+			c.responseErr <- err
+		}
 	}
-}
-
-func (s *session) startKeyValueProcessor() {
-	go func() {
-		logInfo("[Session] command processor is running")
-		defer logInfo("[Session] command processor is exiting")
-
-		for {
-			select {
-			case kv := <-s.recvKvQueue:
-				if kv == nil {
-					return
-				}
-				s.keyValueHandler(s.dc, kv)
-
-			case r := <-sessCtrl.recvKeyValue:
-				if r.getAll {
-					kvs := []*ActionKeyValue{}
-					for k, v := range kvStore {
-						kvs = append(kvs, &ActionKeyValue{Key: k, Value: v.Value, MTime: v.MTime})
-					}
-					r.responseKv = kvs
-				} else {
-					if kv, ok := kvStore[r.key]; ok {
-						r.responseKv = []*ActionKeyValue{&ActionKeyValue{Key: kv.Key, Value: kv.Value, Rev: kv.Rev, MTime: kv.MTime}}
-					} else {
-						r.responseKv = nil
-					}
-				}
-				r.response <- nil
-			}
-		}
-	}()
 }
 
 func sessionIdleLoop() {
@@ -453,14 +350,10 @@ func sessionIdleLoop() {
 	for {
 		select {
 		case c := <-sessCtrl.start:
-			err := initSession(c.dc, c.useMQTT)
-			sess.startCommandProcessor()
-			sess.startKeyValueProcessor()
-
-			if err == nil {
+			if err := initSession(c.dc, c.useMQTT); err == nil {
 				sessState = SessionActive
 			} else {
-				logError("[SessionManager] session not started: %s", err.Error())
+				logError("[SessionManager] connection error: %s", err.Error())
 				sessState = SessionRecovering
 			}
 
@@ -473,10 +366,10 @@ func sessionIdleLoop() {
 		case c := <-sessCtrl.getState:
 			c.response <- SessionIdle
 
-		case c := <-sessCtrl.sendEvent:
-			c.response <- ErrorSessionNotStarted
+		case c := <-sessCtrl.accessKV:
+			c.responseErr <- ErrorSessionNotStarted
 
-		case c := <-sessCtrl.sendKeyValue:
+		case c := <-sessCtrl.sendEvent:
 			c.response <- ErrorSessionNotStarted
 		}
 	}
@@ -510,9 +403,8 @@ func sessionActiveLoop() {
 			sess.evtQueue <- c.event
 			c.response <- nil
 
-		case c := <-sessCtrl.sendKeyValue:
-			sess.sendKvQueue <- c.keyValue
-			c.response <- nil
+		case c := <-sessCtrl.accessKV:
+			handleKVAccess(c, false)
 
 		case <-sessCtrl.ping:
 			sess.conn.ping(sessPingTimeout)
@@ -563,6 +455,9 @@ func sessionRecoveringLoop() {
 
 		case c := <-sessCtrl.sendEvent:
 			c.response <- ErrorSessionRecovering
+
+		case c := <-sessCtrl.accessKV:
+			handleKVAccess(c, true)
 		}
 	}
 }
@@ -639,62 +534,103 @@ func SendEvent(eventType string, eventData map[string]interface{}, qos QOSLevel)
 	return <-ctrl.response
 }
 
-func SetKeyValue(key string, value map[string]interface{}) error {
-	ctrl := &sessCtrlSendKeyValue{
-		keyValue: &ActionKeyValue{Action: "set", Key: key, Value: value},
-		response: make(chan error, 1),
+// GetKeyValue looks up a key-value pair from the Device Data Proxy.
+// It returns an error if the device connection session is in idle state.
+// When the session is in recovery state, the key-value pair returned will
+// contain the last known value in the local memory cache.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func GetKeyValue(key string) (*KeyValue, error) {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionGet,
+		key:         key,
+		responseErr: make(chan error, 1),
+		responseKV:  make(chan *KeyValue, 1),
 	}
 
-	sessCtrl.sendKeyValue <- ctrl
-	return <-ctrl.response
-}
+	sessCtrl.accessKV <- ctrl
 
-/*
-  TODO
-  GetKeyValue and GetAllKeyValues APIs are half baked.
-	Do not use them yet.
-	Currently startKeyValueProcess() goroutine loop life span is tied to MQTT connection.
-	So the channel request may be stuck while instable connection.
-	Need to change the lifespan to the same as session goroutine lifespan.
-
-func GetKeyValue(key string) (*KeyValue, bool) {
-	ctrl := &sessCtrlRecvKeyValue{
-		key:      key,
-		response: make(chan error, 1),
-	}
-
-	sessCtrl.recvKeyValue <- ctrl
-	if r := <-ctrl.response; r == nil {
-		return nil, false
-	} else {
-		return ctrl.responseKv[0], true
+	select {
+	case err := <-ctrl.responseErr:
+		return nil, err
+	case kv := <-ctrl.responseKV:
+		return kv, nil
 	}
 }
 
-func GetAllKeyValues() []*KeyValue {
-	ctrl := &sessCtrlRecvKeyValue{
-		getAll:   true,
-		response: make(chan error, 1),
+// GetAllKeyValues returns all key-value pairs stored in the Device Data Proxy.
+// It returns an error if the device connection session is in idle state.
+// When the session is in recovery state, the key-value pairs returned will
+// contain the last known values in the local memory cache.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func GetAllKeyValues() ([]*KeyValue, error) {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionGetAll,
+		responseErr: make(chan error, 1),
+		responseKV:  make(chan *KeyValue, 1),
 	}
 
-	sessCtrl.recvKeyValue <- ctrl
-	if r := <-ctrl.response; r == nil {
-		return nil
-	} else {
-		return ctrl.responseKv
+	sessCtrl.accessKV <- ctrl
+	res := make([]*KeyValue, 0, 10)
+
+	for {
+		select {
+		case err := <-ctrl.responseErr:
+			return nil, err
+		case kv := <-ctrl.responseKV:
+			if kv == nil {
+				return res, nil
+			}
+
+			res = append(res, kv)
+		}
 	}
 }
 
-*/
-
-func DeleteKeyValue(key string, value map[string]interface{}) error {
-	ctrl := &sessCtrlSendKeyValue{
-		keyValue: &ActionKeyValue{Action: "delete", Key: key, Value: value},
-		response: make(chan error, 1),
+// SetKeyValue stores a key-value pair to the Device Data Proxy.
+// It returns an error if the device connection session is in idle or recovery state.
+//
+// IMPORTANT: Race condition may arise if both the device and someone else are
+// updating the same key-value pair.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func SetKeyValue(key string, value interface{}) error {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionSet,
+		key:         key,
+		value:       value,
+		responseErr: make(chan error, 1),
 	}
 
-	sessCtrl.sendKeyValue <- ctrl
-	return <-ctrl.response
+	sessCtrl.accessKV <- ctrl
+	return <-ctrl.responseErr
+}
+
+// DeleteKeyValue deletes a key-value pair from the Device Data Proxy.
+// It returns an error if the device connection session is in idle or recovery state.
+//
+// IMPORTANT: Race condition may arise if both the device and someone else are
+// updating the same key-value pair.
+//
+// Note: Functions that access the Device Data Proxy should be called only after
+// the local cache has been loaded. To get notified of this event, use
+// SetKeyValuesReadyCallback() to assign a callback function.
+func DeleteKeyValue(key string) error {
+	ctrl := &sessCtrlAccessKV{
+		action:      kvActionDelete,
+		key:         key,
+		responseErr: make(chan error, 1),
+	}
+
+	sessCtrl.accessKV <- ctrl
+	return <-ctrl.responseErr
 }
 
 func (s SessionState) String() string {
