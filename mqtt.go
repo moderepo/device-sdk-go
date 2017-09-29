@@ -123,19 +123,18 @@ func (mc *mqttConn) connect() error {
 	return nil
 }
 
-func (mc *mqttConn) subscribe(topic string, msgHandler mqttMsgHandler) error {
-	logInfo("[MQTT] subscribing to topic %s", topic)
-
-	subs := []packet.Subscription{
-		packet.Subscription{
-			Topic: topic,
-			QOS:   packet.QOSAtMostOnce, // MODE only supports QoS0 for subscriptions
-		},
-	}
-
+func (mc *mqttConn) subscribe(subs []mqttSubscription) error {
 	p := packet.NewSubscribePacket()
 	p.PacketID = mc.getPacketID()
-	p.Subscriptions = subs
+	p.Subscriptions = make([]packet.Subscription, 0, 10)
+
+	for _, s := range subs {
+		logInfo("[MQTT] subscribing to topic %s", s.topic)
+		p.Subscriptions = append(p.Subscriptions, packet.Subscription{
+			Topic: s.topic,
+			QOS:   packet.QOSAtMostOnce, // MODE only supports QoS0 for subscriptions
+		})
+	}
 
 	if err := mc.sendPacket(p); err != nil {
 		return err
@@ -159,18 +158,23 @@ func (mc *mqttConn) subscribe(topic string, msgHandler mqttMsgHandler) error {
 		return errors.New("mismatch packet id")
 	}
 
-	if len(ack.ReturnCodes) != 1 {
-		logError("[MQTT] received SUBACK packet with no return codes")
+	if len(ack.ReturnCodes) != len(subs) {
+		logError("[MQTT] received SUBACK packet with incorrect number of return codes: expect %d; got %d", len(subs), len(ack.ReturnCodes))
 		return errors.New("invalid packet")
 	}
 
-	if ack.ReturnCodes[0] == packet.QOSFailure {
-		logError("[MQTT] subscription rejected")
-		return errors.New("subscription rejected")
+	for i, code := range ack.ReturnCodes {
+		s := subs[i]
+
+		if code == packet.QOSFailure {
+			logError("[MQTT] subscription to topic %s rejected", s.topic)
+			return errors.New("subscription rejected")
+		}
+
+		logInfo("[MQTT] subscription to topic %s succeeded with QOS %v", s.topic, code)
+		mc.subs[s.topic] = s
 	}
 
-	logInfo("[MQTT] subscription succeeded with QOS %v", ack.ReturnCodes[0])
-	mc.subs[topic] = mqttSubscription{topic: topic, msgHandler: msgHandler}
 	return nil
 }
 
@@ -458,12 +462,18 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 		return nil, err
 	}
 
-	if err := mc.subscribe(fmt.Sprintf("/devices/%d/command", mc.dc.DeviceID), mc.handleCommandMsg); err != nil {
-		mc.conn.Close()
-		return nil, err
+	subs := []mqttSubscription{
+		mqttSubscription{
+			topic:      fmt.Sprintf("/devices/%d/command", mc.dc.DeviceID),
+			msgHandler: mc.handleCommandMsg,
+		},
+		mqttSubscription{
+			topic:      fmt.Sprintf("/devices/%d/kv", mc.dc.DeviceID),
+			msgHandler: mc.handleKeyValueMsg,
+		},
 	}
 
-	if err := mc.subscribe(fmt.Sprintf("/devices/%d/kv", mc.dc.DeviceID), mc.handleKeyValueMsg); err != nil {
+	if err := mc.subscribe(subs); err != nil {
 		mc.conn.Close()
 		return nil, err
 	}
