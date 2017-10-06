@@ -132,7 +132,7 @@ type (
 	// DeviceCommand represents a command received from the MODE cloud.
 	DeviceCommand struct {
 		Action  string
-		payload []byte
+		payload json.RawMessage
 	}
 
 	// DeviceEvent represents an event to be sent to the MODE cloud.
