@@ -180,8 +180,8 @@ func (mc *mqttConn) subscribe(subs []mqttSubscription) error {
 
 func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 	var cmd struct {
-		Action     string                 `json:"action"`
-		Parameters map[string]interface{} `json:"parameters"`
+		Action     string          `json:"action"`
+		Parameters json.RawMessage `json:"parameters"`
 	}
 
 	if err := decodeOpaqueJSON(p.Message.Payload, &cmd); err != nil {
@@ -192,13 +192,7 @@ func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 		return errors.New("message data is not valid command JSON: no action field")
 	}
 
-	// Re-encode parameters into JSON payload for later use.
-	var payload []byte
-	if cmd.Parameters != nil {
-		payload, _ = json.Marshal(cmd.Parameters)
-	}
-
-	mc.command <- &DeviceCommand{Action: cmd.Action, payload: payload}
+	mc.command <- &DeviceCommand{Action: cmd.Action, payload: cmd.Parameters}
 	return nil
 }
 
