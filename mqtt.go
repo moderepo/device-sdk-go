@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gomqtt/packet"
+	"github.com/moderepo/device-sdk-go/mqtt_packet"
 )
 
 const (
