@@ -278,7 +278,8 @@ func (mc *mqttConn) runPacketWriter() {
 		if err != nil {
 			logError("[MQTT] failed to send %s packet: %s", p.Type(), err.Error())
 			mc.err <- err
-			break
+			// TODO why we need this break?
+			//break
 		}
 
 		logInfo("[MQTT] successfully sent %s packet", p.Type())

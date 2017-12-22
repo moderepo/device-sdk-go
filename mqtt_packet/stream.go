@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
+	"time"
 )
 
 // ErrDetectionOverflow is returned by the Decoder if the next packet couldn't
@@ -19,6 +21,7 @@ var ErrReadLimitExceeded = errors.New("read limit exceeded")
 
 // An Encoder wraps a Writer and continuously encodes packets.
 type Encoder struct {
+	conn   net.Conn
 	writer *bufio.Writer
 	buffer bytes.Buffer
 }
@@ -44,6 +47,7 @@ func (e *Encoder) Write(pkt Packet) error {
 		return err
 	}
 
+	e.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	// write buffer
 	_, err = e.writer.Write(buf)
 	if err != nil {
@@ -55,6 +59,7 @@ func (e *Encoder) Write(pkt Packet) error {
 
 // Flush flushes the writer buffer.
 func (e *Encoder) Flush() error {
+	e.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return e.writer.Flush()
 }
 
@@ -62,6 +67,7 @@ func (e *Encoder) Flush() error {
 type Decoder struct {
 	Limit int64
 
+	conn   net.Conn
 	reader *bufio.Reader
 	buffer bytes.Buffer
 }
@@ -142,12 +148,14 @@ type Stream struct {
 }
 
 // NewStream creates a new Stream.
-func NewStream(reader io.Reader, writer io.Writer) *Stream {
+func NewStream(reader net.Conn, writer net.Conn) *Stream {
 	return &Stream{
 		Decoder: Decoder{
+			conn:   reader,
 			reader: bufio.NewReader(reader),
 		},
 		Encoder: Encoder{
+			conn:   writer,
 			writer: bufio.NewWriter(writer),
 		},
 	}
