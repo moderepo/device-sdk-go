@@ -24,7 +24,8 @@ var (
 	}
 
 	httpClient = &http.Client{
-		Timeout: defaultHTTPTimeout,
+		Transport: httpTransport,
+		Timeout:   defaultHTTPTimeout,
 	}
 )
 
