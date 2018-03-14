@@ -479,8 +479,8 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	mc.stopPublisher = make(chan bool)
 	mc.err = make(chan error, 10) // make sure this won't block
 	mc.outPacket = make(chan packet.Packet, 1)
-	mc.puback = make(chan *packet.PubackPacket, 1)
-	mc.pingresp = make(chan *packet.PingrespPacket, 1)
+	mc.puback = make(chan *packet.PubackPacket, 10)     // make sure this won't block
+	mc.pingresp = make(chan *packet.PingrespPacket, 10) // make sure this won't block
 
 	go mc.runPacketReader()
 	go mc.runPacketWriter()
