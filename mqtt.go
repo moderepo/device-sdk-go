@@ -232,7 +232,7 @@ func (mc *mqttConn) reportError(err error) {
 	case mc.err <- err:
 		// error sent
 	default:
-		// error not sent because channel is blocking.
+		logError("[MQTT] error not propagated because channel is blocked.")
 	}
 }
 
@@ -485,10 +485,10 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	mc.event = evtQueue
 	mc.kvSync = kvSyncQueue
 	mc.kvPush = kvPushQueue
-	mc.doPing = make(chan time.Duration)
+	mc.doPing = make(chan time.Duration, 1)
 	mc.stopPublisher = make(chan bool)
-	mc.err = make(chan error)
-	mc.outPacket = make(chan packet.Packet)
+	mc.err = make(chan error, 1)
+	mc.outPacket = make(chan packet.Packet, 1)
 	mc.puback = make(chan *packet.PubackPacket, 10)     // make sure this won't block
 	mc.pingresp = make(chan *packet.PingrespPacket, 10) // make sure this won't block
 
