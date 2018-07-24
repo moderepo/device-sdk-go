@@ -226,6 +226,16 @@ func (mc *mqttConn) handlePublishPacket(p *packet.PublishPacket) {
 	}
 }
 
+func (mc *mqttConn) reportError(err error) {
+	// Report the error without blocking.
+	select {
+	case mc.err <- err:
+		// error sent
+	default:
+		// error not sent because channel is blocking.
+	}
+}
+
 func (mc *mqttConn) runPacketReader() {
 	logInfo("[MQTT] packet reader is running")
 	mc.wgRead.Add(1)
@@ -239,7 +249,7 @@ func (mc *mqttConn) runPacketReader() {
 		p, err := mc.stream.Read()
 		if err != nil {
 			logError("[MQTT] failed to read packet: %s", err.Error())
-			mc.err <- err
+			mc.reportError(err)
 			break
 		}
 
@@ -278,7 +288,7 @@ func (mc *mqttConn) runPacketWriter() {
 			logInfo("[MQTT] successfully sent %s packet", p.Type())
 		} else {
 			logError("[MQTT] failed to send %s packet: %s", p.Type(), err.Error())
-			mc.err <- err
+			mc.reportError(err)
 			// We don't need "break" here because we have to vacuum outPacket until the session is closed.
 		}
 	}
@@ -301,7 +311,7 @@ func (mc *mqttConn) runPinger() {
 		select {
 		case <-time.After(pingTimeout):
 			logError("[MQTT] did not receive PINGRESP packet within %v", pingTimeout)
-			mc.err <- errors.New("ping timeout")
+			mc.reportError(errors.New("ping timeout"))
 
 		case <-mc.pingresp:
 			logInfo("[MQTT] received PINGRESP packet")
@@ -475,10 +485,10 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	mc.event = evtQueue
 	mc.kvSync = kvSyncQueue
 	mc.kvPush = kvPushQueue
-	mc.doPing = make(chan time.Duration, 1)
+	mc.doPing = make(chan time.Duration)
 	mc.stopPublisher = make(chan bool)
-	mc.err = make(chan error, 10) // make sure this won't block
-	mc.outPacket = make(chan packet.Packet, 1)
+	mc.err = make(chan error)
+	mc.outPacket = make(chan packet.Packet)
 	mc.puback = make(chan *packet.PubackPacket, 10)     // make sure this won't block
 	mc.pingresp = make(chan *packet.PingrespPacket, 10) // make sure this won't block
 
