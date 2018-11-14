@@ -35,6 +35,7 @@ type (
 		subs          map[string]mqttSubscription
 		command       chan<- *DeviceCommand
 		event         <-chan *DeviceEvent
+		bulkData      <-chan *DeviceBulkData
 		kvSync        chan<- *keyValueSync
 		kvPush        <-chan *keyValueSync
 		err           chan error
@@ -145,7 +146,6 @@ func (mc *mqttConn) subscribe(subs []mqttSubscription) error {
 		logError("[MQTT] failed to read from stream: %s", err.Error())
 		return err
 	}
-
 	if r.Type() != packet.SUBACK {
 		logError("[MQTT] received unexpected packet %s", r.Type())
 		return errors.New("unexpected response")
@@ -338,6 +338,11 @@ func (mc *mqttConn) runPublisher() {
 				logError("[MQTT] publisher failed to send event: %s", err.Error())
 			}
 
+		case b := <-mc.bulkData:
+			if err := mc.sendBulkData(b); err != nil {
+				logError("[MQTT] publisher failed to send bulkData: %s", err.Error())
+			}
+
 		case kvSync := <-mc.kvPush:
 			if err := mc.sendKeyValueUpdate(kvSync); err != nil {
 				logError("[MQTT] publisher failed to send key-value update: %s", err.Error())
@@ -396,6 +401,54 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	return errors.New("event dropped")
 }
 
+func (mc *mqttConn) sendBulkData(b *DeviceBulkData) error {
+	var qos byte
+
+	switch b.qos {
+	case QOSAtMostOnce:
+		qos = packet.QOSAtMostOnce
+	case QOSAtLeastOnce:
+		qos = packet.QOSAtLeastOnce
+	default:
+		return errors.New("unsupported qos level")
+	}
+
+	p := packet.NewPublishPacket()
+	p.PacketID = mc.getPacketID()
+	p.Message = packet.Message{
+		Topic:   fmt.Sprintf("/devices/%d/bulkdata/%s", mc.dc.DeviceID, b.StreamID),
+		QOS:     qos,
+		Payload: b.Blob,
+	}
+
+	for count := uint(1); count <= maxDeviceEventAttempts; count++ {
+		mc.outPacket <- p
+
+		if b.qos == QOSAtMostOnce {
+			return nil
+		}
+
+		logInfo("[MQTT] bulk data delivery attempt #%d for packet ID %d", count, p.PacketID)
+		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
+
+		select {
+		case <-time.After(deviceEventRetryInterval):
+			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, deviceEventRetryInterval)
+
+		case ack := <-mc.puback:
+			if ack.PacketID == p.PacketID {
+				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
+				return nil
+			}
+			// TBD: Something is really wrong if packet ID does not match. What to do?
+		}
+
+		p.Dup = true
+	}
+
+	return errors.New("bulk data dropped")
+}
+
 func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	// Always QoS1
 	qos := packet.QOSAtLeastOnce
@@ -434,7 +487,7 @@ func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	return errors.New("key-value update dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, evtBulkDataQueue <-chan *DeviceBulkData, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -483,6 +536,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 
 	mc.command = cmdQueue
 	mc.event = evtQueue
+	mc.bulkData = evtBulkDataQueue
 	mc.kvSync = kvSyncQueue
 	mc.kvPush = kvPushQueue
 	mc.doPing = make(chan time.Duration, 1)

@@ -62,6 +62,7 @@ var (
 
 	// TBD: how much buffering should we allow?
 	eventQueueLength            = 128
+	bulkDataQueueLength         = 128
 	commandQueueLength          = 128
 	keyValueSyncQueueLength     = 128
 	keyValuePushQueueLength     = 128
@@ -140,6 +141,13 @@ type (
 		EventType string                 `json:"eventType"`
 		EventData map[string]interface{} `json:"eventData,omitempty"`
 		qos       QOSLevel               // not exported to JSON
+	}
+
+	// BulkData represents an event to be sent to the MODE cloud.
+	DeviceBulkData struct {
+		StreamID string
+		Blob     []byte
+		qos      QOSLevel // not exported to serializer
 	}
 
 	// A callback function that handles a device command.
