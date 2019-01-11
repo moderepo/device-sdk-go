@@ -1,93 +1,37 @@
 package mode
 
 import (
+	"bytes"
 	"fmt"
-	"io"
-	//	"io/ioutil"
-	"net"
 	"os"
-	"sync"
 	"testing"
 
 	packet "github.com/moderepo/device-sdk-go/mqtt_packet"
 	"github.com/stretchr/testify/assert"
 )
 
-var testPort int = 9999
-var wg sync.WaitGroup
-var resultingPubMessage string
-var resultingPubTopic string
-
-func readStream(conn net.Conn) bool {
-	for {
-		tmp := make([]byte, 256)
-		n, err := conn.Read(tmp)
-		if err != nil {
-			if err != io.EOF {
-				fmt.Println("read error:", err)
-			}
-			break
-		}
-		l, ty := packet.DetectPacket(tmp[0:n])
-		var pkt packet.Packet
-		var pub *packet.PublishPacket = nil
-		if ty == packet.CONNECT {
-			pkt = &packet.ConnackPacket{ReturnCode: packet.ConnectionAccepted}
-		} else if ty == packet.SUBSCRIBE {
-			pkt = &packet.SubackPacket{PacketID: 1, ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
-		} else if ty == packet.PUBLISH {
-			pub = packet.NewPublishPacket()
-			pub.Decode(tmp[0:n])
-			pkt = &packet.PubackPacket{PacketID: pub.PacketID}
-		} else {
-			fmt.Println("tcp buffer:", l, ty)
-			continue
-		}
-
-		dst := make([]byte, 100)
-		n2, err := pkt.Encode(dst)
-		if err != nil {
-			fmt.Println("encode error:", err)
-			break
-		}
-		if _, err = conn.Write(dst[0:n2]); err != nil {
-			break
-		}
-		if pub != nil {
-			resultingPubMessage = pub.Message.String()
-			resultingPubTopic = pub.Message.Topic
-			return true
-		}
+var (
+	sessionTestPort int            = 9999
+	sessionMqttTest MqttTestDaemon = MqttTestDaemon{
+		ExitChannel:  make(chan bool, 1),
+		Results:      map[string]string{},
+		TestPort:     sessionTestPort,
+		WaitOn:       map[string]bool{},
+		WriteChannel: make(chan packet.PublishPacket, 1),
 	}
-	return false
+)
+
+func TestMain(m *testing.M) {
+	SetMQTTHostPort("localhost", sessionTestPort, false)
+	go sessionMqttTest.Start()
+	exitCode := m.Run()
+	sessionMqttTest.ShutDown()
+	os.Exit(exitCode)
 }
 
-func dummyMQTTD() {
-	l, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", testPort))
-	if err != nil {
-		panic(err)
-	}
-	defer l.Close()
-
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			continue
-		}
-		if ReadStream(conn) {
-			wg.Done()
-			return
-		}
-		conn.Close()
-	}
-	return
-}
-
-func TestSession(t *testing.T) {
-	// Fake server to capture event
-	wg.Add(1)
-	go DummyMQTTD()
-	SetMQTTHostPort("localhost", testPort, false)
+func TestSessionSendBulkData(t *testing.T) {
+	sessionMqttTest.WaitOn["pub"] = true
+	sessionMqttTest.WG.Add(1)
 
 	dc := &DeviceContext{
 		DeviceID:  0,             // change this to real device ID
@@ -101,7 +45,75 @@ func TestSession(t *testing.T) {
 
 	data := []byte("blob")
 	SendBulkData("stream1", data, QOSAtLeastOnce)
-	wg.Wait()
+	sessionMqttTest.WG.Wait()
 	StopSession()
-	assert.Equal(t, resultingPubTopic, "/devices/0/bulkdata/stream1")
+	assert.Equal(t, sessionMqttTest.Results["PubTopic"], "/devices/0/bulkdata/stream1")
+}
+
+func TestSessionSystemCommandNoFunc(t *testing.T) {
+	sessionMqttTest.Reset()
+	sessionMqttTest.WaitOn["writeStream"] = true
+	sessionMqttTest.WG.Add(1)
+
+	dc := &DeviceContext{
+		DeviceID:  0,             // change this to real device ID
+		AuthToken: "XXXXXXXXXXX", // change this to real API key assigned to device
+	}
+
+	if err := StartSession(dc); err != nil {
+		fmt.Printf("Failed to start session: %v\n", err)
+		os.Exit(1)
+	}
+
+	payloadStr := `{"action":"blah", "parameters":{"a":"b"}}`
+	payload := bytes.NewBufferString(payloadStr).Bytes()
+	sessionMqttTest.WriteChannel <- packet.PublishPacket{
+		Message: packet.Message{
+			Topic:   "/devices/0/systemcommand",
+			Payload: payload,
+			QOS:     packet.QOSAtLeastOnce,
+		},
+		PacketID: 10,
+	}
+
+	sessionMqttTest.WG.Wait()
+	StopSession()
+	assert.Equal(t, true, true)
+}
+
+func TestSessionSystemCommand(t *testing.T) {
+	sessionMqttTest.Reset()
+	sessionMqttTest.WaitOn["writeStream"] = true
+	sessionMqttTest.WG.Add(2)
+
+	dc := &DeviceContext{
+		DeviceID:  0,             // change this to real device ID
+		AuthToken: "XXXXXXXXXXX", // change this to real API key assigned to device
+	}
+
+	var action string
+	SetSystemCommandHandler("blah", func(ctx *DeviceContext, cmd *DeviceCommand) {
+		action = cmd.Action
+		sessionMqttTest.WG.Done()
+	})
+
+	if err := StartSession(dc); err != nil {
+		fmt.Printf("Failed to start session: %v\n", err)
+		os.Exit(1)
+	}
+
+	payloadStr := `{"action":"blah", "parameters":{"a":"b"}}`
+	payload := bytes.NewBufferString(payloadStr).Bytes()
+	sessionMqttTest.WriteChannel <- packet.PublishPacket{
+		Message: packet.Message{
+			Topic:   "/devices/0/systemcommand",
+			Payload: payload,
+			QOS:     packet.QOSAtLeastOnce,
+		},
+		PacketID: 10,
+	}
+
+	sessionMqttTest.WG.Wait()
+	StopSession()
+	assert.Equal(t, action, "blah")
 }

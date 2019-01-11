@@ -179,11 +179,15 @@ func (mc *mqttConn) subscribe(subs []mqttSubscription) error {
 }
 
 func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
-	var cmd struct {
-		Action     string          `json:"action"`
-		Parameters json.RawMessage `json:"parameters"`
-	}
+	return mc.handleCommonCommandMsg(p, false)
+}
 
+func (mc *mqttConn) handleSystemCommandMsg(p *packet.PublishPacket) error {
+	return mc.handleCommonCommandMsg(p, true)
+}
+
+func (mc *mqttConn) handleCommonCommandMsg(p *packet.PublishPacket, system bool) error {
+	cmd := DeviceCommand{}
 	if err := decodeOpaqueJSON(p.Message.Payload, &cmd); err != nil {
 		return fmt.Errorf("message data is not valid command JSON: %s", err.Error())
 	}
@@ -191,8 +195,11 @@ func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
 	if cmd.Action == "" {
 		return errors.New("message data is not valid command JSON: no action field")
 	}
-
-	mc.command <- &DeviceCommand{Action: cmd.Action, payload: cmd.Parameters}
+	if system {
+		mc.command <- &DeviceCommand{Action: cmd.Action, Payload: cmd.Payload, system: true}
+	} else {
+		mc.command <- &DeviceCommand{Action: cmd.Action, Payload: cmd.Payload, system: false}
+	}
 	return nil
 }
 
@@ -281,6 +288,7 @@ func (mc *mqttConn) runPacketWriter() {
 		*/
 		mc.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 500))
 		mc.conn.Close()
+		logInfo("[MQTT] packet writer is exit")
 	}()
 
 	for p := range mc.outPacket {
@@ -487,7 +495,13 @@ func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	return errors.New("key-value update dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, evtBulkDataQueue <-chan *DeviceBulkData, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(
+	cmdQueue chan<- *DeviceCommand,
+	evtQueue <-chan *DeviceEvent,
+	evtBulkDataQueue <-chan *DeviceBulkData,
+	kvSyncQueue chan<- *keyValueSync,
+	kvPushQueue <-chan *keyValueSync,
+) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -522,6 +536,10 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 		mqttSubscription{
 			topic:      fmt.Sprintf("/devices/%d/command", mc.dc.DeviceID),
 			msgHandler: mc.handleCommandMsg,
+		},
+		mqttSubscription{
+			topic:      fmt.Sprintf("/devices/%d/systemcommand", mc.dc.DeviceID),
+			msgHandler: mc.handleSystemCommandMsg,
 		},
 		mqttSubscription{
 			topic:      fmt.Sprintf("/devices/%d/kv", mc.dc.DeviceID),

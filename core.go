@@ -132,8 +132,9 @@ type (
 
 	// DeviceCommand represents a command received from the MODE cloud.
 	DeviceCommand struct {
-		Action  string
-		payload json.RawMessage
+		Action  string          `json:"action"`
+		Payload json.RawMessage `json:"parameters"`
+		system  bool
 	}
 
 	// DeviceEvent represents an event to be sent to the MODE cloud.
@@ -242,10 +243,10 @@ func (dc *DeviceContext) GetInfo() (*DeviceInfo, error) {
 }
 
 func (cmd *DeviceCommand) String() string {
-	if cmd.payload == nil {
+	if cmd.Payload == nil {
 		return fmt.Sprintf("{Action:\"%s\"}", cmd.Action)
 	} else {
-		return fmt.Sprintf("{Action:\"%s\", Parameters:%s}", cmd.Action, string(cmd.payload))
+		return fmt.Sprintf("{Action:\"%s\", Parameters:%s}", cmd.Action, string(cmd.Payload))
 	}
 }
 
@@ -263,10 +264,10 @@ func decodeOpaqueJSON(b []byte, v interface{}) error {
 
 // BindParameters maps the command parameters from JSON to the provided struct.
 func (cmd *DeviceCommand) BindParameters(v interface{}) error {
-	if cmd.payload == nil {
+	if cmd.Payload == nil {
 		// nothing to do.
 		return nil
 	}
 
-	return json.Unmarshal(cmd.payload, v)
+	return json.Unmarshal(cmd.Payload, v)
 }

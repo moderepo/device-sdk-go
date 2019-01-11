@@ -104,6 +104,8 @@ var (
 	sess *session
 
 	commandHandlers       = map[string]CommandHandler{}
+	systemCommandHandlers = map[string]CommandHandler{}
+
 	defaultCommandHandler CommandHandler
 
 	sessStateCallback SessionStateCallback
@@ -153,6 +155,16 @@ func SetCommandHandler(action string, h CommandHandler) {
 // goroutines to do certain work.
 func SetDefaultCommandHandler(h CommandHandler) {
 	defaultCommandHandler = h
+}
+
+// SetSystenCommandHandler assigns a function to handle system level device commands
+// coming from the MODE cloud.
+//
+// IMPORTANT: Incoming device commands are queued and handled serially by
+// a goroutine. In your handler function, you should decide whether to spawn
+// goroutines to do certain work.
+func SetSystemCommandHandler(action string, h CommandHandler) {
+	systemCommandHandlers[strings.ToLower(action)] = h
 }
 
 // SetSessionStateCallback designates a function to be called when
@@ -283,11 +295,20 @@ func (s *session) startCommandProcessor() {
 		defer logInfo("[Session] command processor is exiting")
 
 		for cmd := range s.cmdQueue {
-			h, exists := commandHandlers[strings.ToLower(cmd.Action)]
-			if exists {
-				h(s.dc, cmd)
-			} else if defaultCommandHandler != nil {
-				defaultCommandHandler(s.dc, cmd)
+			if cmd.system {
+				h, exists := systemCommandHandlers[strings.ToLower(cmd.Action)]
+				if exists {
+					h(s.dc, cmd)
+				} else {
+					logInfo("[Session] system command %s is not implemented", strings.ToLower(cmd.Action))
+				}
+			} else {
+				h, exists := commandHandlers[strings.ToLower(cmd.Action)]
+				if exists {
+					h(s.dc, cmd)
+				} else if defaultCommandHandler != nil {
+					defaultCommandHandler(s.dc, cmd)
+				}
 			}
 		}
 	}()
