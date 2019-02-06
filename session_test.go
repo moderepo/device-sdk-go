@@ -3,6 +3,7 @@ package mode
 import (
 	"fmt"
 	"io"
+
 	//	"io/ioutil"
 	"net"
 	"os"
@@ -103,5 +104,5 @@ func TestSession(t *testing.T) {
 	SendBulkData("stream1", data, QOSAtLeastOnce)
 	wg.Wait()
 	StopSession()
-	assert.Equal(t, resultingPubTopic, "/devices/0/bulkdata/stream1")
+	assert.Equal(t, resultingPubTopic, "/devices/0/bulkData/stream1")
 }

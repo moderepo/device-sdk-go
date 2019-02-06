@@ -416,7 +416,7 @@ func (mc *mqttConn) sendBulkData(b *DeviceBulkData) error {
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
 	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/bulkdata/%s", mc.dc.DeviceID, b.StreamID),
+		Topic:   fmt.Sprintf("/devices/%d/bulkData/%s", mc.dc.DeviceID, b.StreamID),
 		QOS:     qos,
 		Payload: b.Blob,
 	}
