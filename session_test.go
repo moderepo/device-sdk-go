@@ -74,7 +74,7 @@ func dummyMQTTD() {
 		if err != nil {
 			continue
 		}
-		if ReadStream(conn) {
+		if readStream(conn) {
 			wg.Done()
 			return
 		}
@@ -86,7 +86,7 @@ func dummyMQTTD() {
 func TestSession(t *testing.T) {
 	// Fake server to capture event
 	wg.Add(1)
-	go DummyMQTTD()
+	go dummyMQTTD()
 	SetMQTTHostPort("localhost", testPort, false)
 
 	dc := &DeviceContext{
