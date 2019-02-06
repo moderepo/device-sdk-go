@@ -143,7 +143,7 @@ type (
 		qos       QOSLevel               // not exported to JSON
 	}
 
-	// BulkData represents an event to be sent to the MODE cloud.
+	// BulkData represents a batch of opaque data to be sent to the MODE cloud.
 	DeviceBulkData struct {
 		StreamID string
 		Blob     []byte
