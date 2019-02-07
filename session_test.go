@@ -3,6 +3,7 @@ package mode
 import (
 	"fmt"
 	"io"
+
 	//	"io/ioutil"
 	"net"
 	"os"
@@ -74,7 +75,7 @@ func dummyMQTTD() {
 		if err != nil {
 			continue
 		}
-		if ReadStream(conn) {
+		if readStream(conn) {
 			wg.Done()
 			return
 		}
@@ -86,7 +87,7 @@ func dummyMQTTD() {
 func TestSession(t *testing.T) {
 	// Fake server to capture event
 	wg.Add(1)
-	go DummyMQTTD()
+	go dummyMQTTD()
 	SetMQTTHostPort("localhost", testPort, false)
 
 	dc := &DeviceContext{
@@ -103,5 +104,5 @@ func TestSession(t *testing.T) {
 	SendBulkData("stream1", data, QOSAtLeastOnce)
 	wg.Wait()
 	StopSession()
-	assert.Equal(t, resultingPubTopic, "/devices/0/bulkdata/stream1")
+	assert.Equal(t, resultingPubTopic, "/devices/0/bulkData/stream1")
 }
