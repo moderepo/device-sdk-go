@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/moderepo/device-sdk-go/mqtt_packet"
+	packet "github.com/moderepo/device-sdk-go/mqtt_packet"
 )
 
 const (
@@ -71,6 +71,8 @@ func (mc *mqttConn) ping(timeout time.Duration) {
 }
 
 func (mc *mqttConn) sendPacket(p packet.Packet) error {
+	// 5 sec is a heuristic number to detect timeout when the upstream pipe is clogged.
+	mc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := mc.stream.Write(p); err != nil {
 		logError("[MQTT] failed to send %s packet: %s", p.Type(), err.Error())
 		return err
@@ -303,8 +305,14 @@ func (mc *mqttConn) runPinger() {
 		mc.wgWrite.Done()
 	}()
 
+loop:
 	for pingTimeout := range mc.doPing {
-		mc.outPacket <- packet.NewPingreqPacket()
+		select {
+		case mc.outPacket <- packet.NewPingreqPacket():
+		default:
+			logError("[MQTT] outPacket is too busy to ping")
+			continue loop
+		}
 
 		logInfo("[MQTT] waiting for PINGRESP packet")
 
