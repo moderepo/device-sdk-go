@@ -28,24 +28,25 @@ type (
 	}
 
 	mqttConn struct {
-		conn          net.Conn
-		stream        *packet.Stream
-		dc            *DeviceContext
-		packetID      uint16
-		subs          map[string]mqttSubscription
-		command       chan<- *DeviceCommand
-		event         <-chan *DeviceEvent
-		bulkData      <-chan *DeviceBulkData
-		kvSync        chan<- *keyValueSync
-		kvPush        <-chan *keyValueSync
-		err           chan error
-		doPing        chan time.Duration
-		outPacket     chan packet.Packet
-		puback        chan *packet.PubackPacket
-		pingresp      chan *packet.PingrespPacket
-		stopPublisher chan bool
-		wgWrite       sync.WaitGroup
-		wgRead        sync.WaitGroup
+		conn           net.Conn
+		stream         *packet.Stream
+		dc             *DeviceContext
+		packetID       uint16
+		subs           map[string]mqttSubscription
+		command        chan<- *DeviceCommand
+		event          <-chan *DeviceEvent
+		bulkData       <-chan *DeviceBulkData
+		syncedBulkData <-chan *DeviceSyncedBulkData
+		kvSync         chan<- *keyValueSync
+		kvPush         <-chan *keyValueSync
+		err            chan error
+		doPing         chan time.Duration
+		outPacket      chan packet.Packet
+		puback         chan *packet.PubackPacket
+		pingresp       chan *packet.PingrespPacket
+		stopPublisher  chan bool
+		wgWrite        sync.WaitGroup
+		wgRead         sync.WaitGroup
 	}
 )
 
@@ -343,6 +344,13 @@ func (mc *mqttConn) runPublisher() {
 				logError("[MQTT] publisher failed to send bulkData: %s", err.Error())
 			}
 
+		case sb := <-mc.syncedBulkData:
+			err := mc.writeBulkData(sb)
+			if err != nil {
+				logError("[MQTT] publisher failed to write bulkData: %s", err.Error())
+			}
+			sb.response <- err
+
 		case kvSync := <-mc.kvPush:
 			if err := mc.sendKeyValueUpdate(kvSync); err != nil {
 				logError("[MQTT] publisher failed to send key-value update: %s", err.Error())
@@ -449,6 +457,39 @@ func (mc *mqttConn) sendBulkData(b *DeviceBulkData) error {
 	return errors.New("bulk data dropped")
 }
 
+func (mc *mqttConn) writeBulkData(b *DeviceSyncedBulkData) error {
+	p := packet.NewPublishPacket()
+	p.PacketID = mc.getPacketID()
+	p.Message = packet.Message{
+		Topic:   fmt.Sprintf("/devices/%d/bulkData/%s", mc.dc.DeviceID, b.StreamID),
+		QOS:     packet.QOSAtLeastOnce,
+		Payload: b.Blob,
+	}
+
+	for count := uint(1); count <= maxSyncedBulkDataAttempts; count++ {
+		mc.outPacket <- p
+
+		logInfo("[MQTT] synced bulk data delivery attempt #%d for packet ID %d", count, p.PacketID)
+		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
+
+		select {
+		case <-time.After(syncedBuldDataRetryInterval):
+			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, syncedBuldDataRetryInterval)
+
+		case ack := <-mc.puback:
+			if ack.PacketID == p.PacketID {
+				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
+				return nil
+			}
+			return errors.New("received wrong ack packet ID")
+		}
+
+		p.Dup = true
+	}
+
+	return errors.New("did not receive ack packet until timeout and bulk data dropped")
+}
+
 func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	// Always QoS1
 	qos := packet.QOSAtLeastOnce
@@ -487,7 +528,7 @@ func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	return errors.New("key-value update dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, evtBulkDataQueue <-chan *DeviceBulkData, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, evtBulkDataQueue <-chan *DeviceBulkData, evtSyncedBulkDataCh <-chan *DeviceSyncedBulkData, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -537,6 +578,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	mc.command = cmdQueue
 	mc.event = evtQueue
 	mc.bulkData = evtBulkDataQueue
+	mc.syncedBulkData = evtSyncedBulkDataCh
 	mc.kvSync = kvSyncQueue
 	mc.kvPush = kvPushQueue
 	mc.doPing = make(chan time.Duration, 1)

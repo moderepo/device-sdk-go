@@ -53,8 +53,10 @@ var (
 	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
 
 	// For publishing device events to cloud.
-	maxDeviceEventAttempts   uint = 3
-	deviceEventRetryInterval      = time.Second * 5
+	maxDeviceEventAttempts      uint = 3
+	deviceEventRetryInterval         = time.Second * 5
+	maxSyncedBulkDataAttempts   uint = 3
+	syncedBuldDataRetryInterval      = time.Second * 5
 
 	// For publishing key-value events to cloud.
 	maxKeyValueUpdateAttempts   uint = 3
@@ -148,6 +150,13 @@ type (
 		StreamID string
 		Blob     []byte
 		qos      QOSLevel // not exported to serializer
+	}
+
+	// BulkData represents a batch of opaque data to be sent to the MODE cloud.
+	DeviceSyncedBulkData struct {
+		StreamID string
+		Blob     []byte
+		response chan error // not exported to serializer
 	}
 
 	// A callback function that handles a device command.
