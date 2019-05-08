@@ -14,12 +14,13 @@ type (
 	}
 
 	session struct {
-		dc            *DeviceContext
-		conn          connection
-		cmdQueue      chan *DeviceCommand
-		evtQueue      chan *DeviceEvent
-		bulkDataQueue chan *DeviceBulkData
-		kvCache       *keyValueCache
+		dc               *DeviceContext
+		conn             connection
+		cmdQueue         chan *DeviceCommand
+		evtQueue         chan *DeviceEvent
+		bulkDataQueue    chan *DeviceBulkData
+		syncedBulkDataCh chan *DeviceSyncedBulkData
+		kvCache          *keyValueCache
 	}
 
 	sessCtrlStart struct {
@@ -42,6 +43,11 @@ type (
 
 	sessCtrlSendBulkData struct {
 		event    *DeviceBulkData
+		response chan error
+	}
+
+	sessCtrlWriteBulkData struct {
+		event    *DeviceSyncedBulkData
 		response chan error
 	}
 
@@ -92,13 +98,14 @@ var (
 	sessState = SessionIdle
 
 	sessCtrl struct {
-		start        chan *sessCtrlStart
-		stop         chan *sessCtrlStop
-		getState     chan *sessCtrlGetState
-		sendEvent    chan *sessCtrlSendEvent
-		sendBulkData chan *sessCtrlSendBulkData
-		accessKV     chan *sessCtrlAccessKV
-		ping         <-chan time.Time
+		start         chan *sessCtrlStart
+		stop          chan *sessCtrlStop
+		getState      chan *sessCtrlGetState
+		sendEvent     chan *sessCtrlSendEvent
+		sendBulkData  chan *sessCtrlSendBulkData
+		writeBulkData chan *sessCtrlWriteBulkData
+		accessKV      chan *sessCtrlAccessKV
+		ping          <-chan time.Time
 	}
 
 	sess *session
@@ -128,6 +135,7 @@ func init() {
 	sessCtrl.getState = make(chan *sessCtrlGetState, 1)
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
 	sessCtrl.sendBulkData = make(chan *sessCtrlSendBulkData, 1)
+	sessCtrl.writeBulkData = make(chan *sessCtrlWriteBulkData, 1)
 	sessCtrl.accessKV = make(chan *sessCtrlAccessKV, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
@@ -202,18 +210,19 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 
 func initSession(dc *DeviceContext) error {
 	sess = &session{
-		dc:            dc,
-		cmdQueue:      make(chan *DeviceCommand, commandQueueLength),
-		evtQueue:      make(chan *DeviceEvent, eventQueueLength),
-		bulkDataQueue: make(chan *DeviceBulkData, bulkDataQueueLength),
-		kvCache:       newKeyValueCache(dc),
+		dc:               dc,
+		cmdQueue:         make(chan *DeviceCommand, commandQueueLength),
+		evtQueue:         make(chan *DeviceEvent, eventQueueLength),
+		bulkDataQueue:    make(chan *DeviceBulkData, bulkDataQueueLength),
+		syncedBulkDataCh: make(chan *DeviceSyncedBulkData, 1),
+		kvCache:          newKeyValueCache(dc),
 	}
 
 	sess.startCommandProcessor()
 	go sess.kvCache.run()
 
 	logInfo("[Session] opening MQTT connection...")
-	conn, err := dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.bulkDataQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
+	conn, err := dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.bulkDataQueue, sess.syncedBulkDataCh, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -267,7 +276,7 @@ func (s *session) reconnect() error {
 	}
 
 	logInfo("[Session] opening MQTT connection...")
-	conn, err := s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.bulkDataQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
+	conn, err := s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.bulkDataQueue, s.syncedBulkDataCh, s.kvCache.syncQueue, s.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -363,6 +372,9 @@ func sessionIdleLoop() {
 
 		case c := <-sessCtrl.sendBulkData:
 			c.response <- ErrorSessionNotStarted
+
+		case c := <-sessCtrl.writeBulkData:
+			c.response <- ErrorSessionNotStarted
 		}
 	}
 }
@@ -398,6 +410,9 @@ func sessionActiveLoop() {
 		case c := <-sessCtrl.sendBulkData:
 			sess.bulkDataQueue <- c.event
 			c.response <- nil
+
+		case c := <-sessCtrl.writeBulkData:
+			sess.syncedBulkDataCh <- c.event
 
 		case c := <-sessCtrl.accessKV:
 			handleKVAccess(c, false)
@@ -453,6 +468,9 @@ func sessionRecoveringLoop() {
 			c.response <- ErrorSessionRecovering
 
 		case c := <-sessCtrl.sendBulkData:
+			c.response <- ErrorSessionRecovering
+
+		case c := <-sessCtrl.writeBulkData:
 			c.response <- ErrorSessionRecovering
 
 		case c := <-sessCtrl.accessKV:
@@ -538,6 +556,21 @@ func SendBulkData(streamID string, blob []byte, qos QOSLevel) error {
 	}
 
 	sessCtrl.sendBulkData <- ctrl
+	err := <-ctrl.response
+	return err
+}
+
+// WriteBulkData write guarantee method to TSDB.
+// It returns an error if the device connection session is in idle or recovery state or
+// nothing ack until timeout from MODE cloud.
+func WriteBulkData(streamID string, blob []byte) error {
+	response := make(chan error, 1)
+	ctrl := &sessCtrlWriteBulkData{
+		event:    &DeviceSyncedBulkData{StreamID: streamID, Blob: blob, response: response}, // Use qos only QOSAtLeastOnce
+		response: response,
+	}
+
+	sessCtrl.writeBulkData <- ctrl
 	err := <-ctrl.response
 	return err
 }
