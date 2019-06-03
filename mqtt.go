@@ -2,15 +2,19 @@ package mode
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/moderepo/device-sdk-go/mqtt_packet"
+	packet "github.com/moderepo/device-sdk-go/mqtt_packet"
+	"golang.org/x/crypto/pkcs12"
 )
 
 const (
@@ -528,16 +532,64 @@ func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	return errors.New("key-value update dropped")
 }
 
+func (dc *DeviceContext) buildConfig() (*tls.Config, error) {
+	p12Content, err := ioutil.ReadFile(dc.PKCS12FileName)
+	if err != nil {
+		logError("Read PKCS#12 file failed: %v", err)
+		return nil, err
+	}
+
+	p12, err := base64.StdEncoding.DecodeString(string(p12Content))
+	if err != nil {
+		logError("PKCS#12 file should be base64 encoded: %v", err)
+		return nil, err
+	}
+
+	blocks, err := pkcs12.ToPEM(p12, dc.PKCS12Password)
+	if err != nil {
+		logError("Read PKCS#12 file failed: %v", err)
+		return nil, err
+	}
+
+	var pemData []byte
+	for _, b := range blocks {
+		pemData = append(pemData, pem.EncodeToMemory(b)...)
+	}
+
+	// then use PEM data for tls to construct tls certificate:
+	cert, err := tls.X509KeyPair(pemData, pemData)
+	if err != nil {
+		logError("Parse X509KeyPair failed: %v", err)
+		return nil, err
+	}
+
+	config := tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true, // TODO: remove this later
+	}
+
+	return &config, nil
+}
+
 func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, evtBulkDataQueue <-chan *DeviceBulkData, evtSyncedBulkDataCh <-chan *DeviceSyncedBulkData, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
 	}
 
+	var config *tls.Config
+	var err error
+	if dc.TLSClientAuth {
+		if config, err = dc.buildConfig(); err != nil {
+			logError("Read client certificates failed: %v", err)
+			return nil, err
+		}
+	}
+
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
 
 	if mqttTLS {
-		if conn, err := tls.DialWithDialer(mqttDialer, "tcp", addr, nil); err == nil {
+		if conn, err := tls.DialWithDialer(mqttDialer, "tcp", addr, config); err == nil {
 			mc.conn = conn
 		} else {
 			logError("MQTT TLS dialer failed: %s", err.Error())

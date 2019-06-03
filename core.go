@@ -119,8 +119,11 @@ type (
 	// If on-demand device provisioning is enabled for your MODE project, you
 	// can call ProvisionDevice to create a new DeviceContext.
 	DeviceContext struct {
-		DeviceID  uint64
-		AuthToken string
+		DeviceID       uint64
+		AuthToken      string
+		TLSClientAuth  bool
+		PKCS12FileName string
+		PKCS12Password string
 	}
 
 	// DeviceInfo contains the key information fetched from the MODE API.
