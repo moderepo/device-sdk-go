@@ -89,8 +89,22 @@ func makeRESTAuth(authToken string) string {
 	return fmt.Sprintf("ModeCloud %s", authToken)
 }
 
-func makeRESTCall(method string, path string, authToken string, data interface{}, resData interface{}) error {
+func makeRESTCall(method string, path string, dc *DeviceContext, data interface{}, resData interface{}) error {
 	url := makeRESTCallURL(path)
+
+	authToken := ""
+	if dc != nil {
+		authToken = dc.AuthToken
+		if dc.TLSClientAuth {
+			config, err := dc.buildConfig()
+			if err != nil {
+				logError("Read client certificates failed: %s", err.Error())
+				return err
+			}
+
+			httpTransport.TLSClientConfig = config
+		}
+	}
 
 	var body io.Reader
 	if data != nil {

@@ -13,11 +13,17 @@ package mode
 
 import (
 	"bytes"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"time"
+
+	"golang.org/x/crypto/pkcs12"
 )
 
 const (
@@ -201,7 +207,7 @@ func ProvisionDevice(token string) (*DeviceContext, error) {
 
 	params.Token = token
 
-	if err := makeRESTCall("POST", "/devices", "", &params, &resData); err != nil {
+	if err := makeRESTCall("POST", "/devices", nil, &params, &resData); err != nil {
 		return nil, err
 	}
 
@@ -226,7 +232,7 @@ func (dc *DeviceContext) EnableClaimMode(duration time.Duration) error {
 	params.Claimable = true
 	params.Duration = uint64(duration / time.Second)
 
-	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
+	return makeRESTCall("POST", "/deviceRegistration", dc, &params, nil)
 }
 
 // DisableClaimMode turns off the device's "claim mode", disallowing it to be added
@@ -240,17 +246,57 @@ func (dc *DeviceContext) DisableClaimMode() error {
 	params.DeviceID = dc.DeviceID
 	params.Claimable = false
 
-	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
+	return makeRESTCall("POST", "/deviceRegistration", dc, &params, nil)
 }
 
 // GetInfo fetches the device's information from MODE.
 func (dc *DeviceContext) GetInfo() (*DeviceInfo, error) {
 	d := &DeviceInfo{}
-	if err := makeRESTCall("GET", fmt.Sprintf("/devices/%d", dc.DeviceID), dc.AuthToken, nil, d); err != nil {
+	if err := makeRESTCall("GET", fmt.Sprintf("/devices/%d", dc.DeviceID), dc, nil, d); err != nil {
 		return nil, err
 	}
 
 	return d, nil
+}
+
+func (dc *DeviceContext) buildConfig() (*tls.Config, error) {
+	p12Content, err := ioutil.ReadFile(dc.PKCS12FileName)
+	if err != nil {
+		logError("Read PKCS#12 file failed: %v", err)
+		return nil, err
+	}
+
+	p12, err := base64.StdEncoding.DecodeString(string(p12Content))
+	if err != nil {
+		logError("PKCS#12 file should be base64 encoded: %v", err)
+		return nil, err
+	}
+
+	blocks, err := pkcs12.ToPEM(p12, dc.PKCS12Password)
+	if err != nil {
+		logError("Read PKCS#12 file failed: %v", err)
+		return nil, err
+	}
+
+	var pemData []byte
+	for _, b := range blocks {
+		pemData = append(pemData, pem.EncodeToMemory(b)...)
+	}
+
+	// then use PEM data for tls to construct tls certificate:
+	cert, err := tls.X509KeyPair(pemData, pemData)
+	if err != nil {
+		logError("Parse X509KeyPair failed: %v", err)
+		return nil, err
+	}
+
+	config := tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true, // TODO: remove this later
+	}
+	config.BuildNameToCertificate()
+
+	return &config, nil
 }
 
 func (cmd *DeviceCommand) String() string {
