@@ -15,16 +15,17 @@ import (
 
 func main() {
 	dc := &mode.DeviceContext{
-		TLSClientAuth:  true,
-		DeviceID:       0,                    // change this to real device ID
-		PKCS12FileName: "/etc/xxxxxssss.p12", // change this to PKCS#12 file path
-		PKCS12Password: "xxxxxxxxxx",         // change this to PKCS#12 password
+		TLSClientAuth:      true,
+		DeviceID:           0,                    // change this to real device ID
+		PKCS12FileName:     "/etc/xxxxxssss.p12", // change this to PKCS#12 file path
+		PKCS12Password:     "xxxxxxxxxx",         // change this to PKCS#12 password
+		InsecureSkipVerify: true,                 // This should be used only for testing.
 	}
 
 	// Default MQTT host (mqtt.tinkermode.com) doesn't support TLS Client Authentication.
 	// You need to set MQTT host manually.
-	mqttHost := "xxxxxxx.corp.tinkermode.com" // change this to real mqtt host
-	mqttPort := 1883                          // change this to real mqtt port
+	mqttHost := "xxxxxxx.corp.tinkermode.com" // change this to real MQTT host
+	mqttPort := 1883                          // change this to real MQTT port
 	mode.SetMQTTHostPort(mqttHost, mqttPort, true)
 
 	mode.SetKeyValuesReadyCallback(func(_ *mode.DeviceContext) {

@@ -125,11 +125,12 @@ type (
 	// If on-demand device provisioning is enabled for your MODE project, you
 	// can call ProvisionDevice to create a new DeviceContext.
 	DeviceContext struct {
-		DeviceID       uint64
-		AuthToken      string
-		TLSClientAuth  bool
-		PKCS12FileName string
-		PKCS12Password string
+		DeviceID           uint64
+		AuthToken          string
+		TLSClientAuth      bool
+		PKCS12FileName     string
+		PKCS12Password     string
+		InsecureSkipVerify bool
 	}
 
 	// DeviceInfo contains the key information fetched from the MODE API.
@@ -292,9 +293,8 @@ func (dc *DeviceContext) buildConfig() (*tls.Config, error) {
 
 	config := tls.Config{
 		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true, // TODO: remove this later
+		InsecureSkipVerify: dc.InsecureSkipVerify,
 	}
-	config.BuildNameToCertificate()
 
 	return &config, nil
 }
