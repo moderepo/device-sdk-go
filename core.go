@@ -130,7 +130,7 @@ type (
 		DeviceID      uint64
 		AuthToken     string
 		TLSClientAuth bool
-		tlsConfig     *tls.Config
+		TLSConfig     *tls.Config
 	}
 
 	// DeviceInfo contains the key information fetched from the MODE API.
@@ -295,7 +295,7 @@ func (dc *DeviceContext) SetPKCS12ClientCertificate(fileName string, password st
 		return err
 	}
 
-	dc.tlsConfig = &tls.Config{
+	dc.TLSConfig = &tls.Config{
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: insecureSkipVerify,
 	}

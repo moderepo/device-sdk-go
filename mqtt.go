@@ -539,11 +539,11 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	var config *tls.Config
 	var err error
 	if dc.TLSClientAuth {
-		if dc.tlsConfig == nil {
+		if dc.TLSConfig == nil {
 			logError("Client certificate is not set: %v", err)
 			return nil, err
 		}
-		config = dc.tlsConfig
+		config = dc.TLSConfig
 	}
 
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)

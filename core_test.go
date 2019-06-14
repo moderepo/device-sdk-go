@@ -93,13 +93,13 @@ func TestDeviceContext_SetPKCS12ClientCertificate(t *testing.T) {
 				t.Errorf("DeviceContext.buildConfig() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if dc.tlsConfig != nil {
-				if tt.shouldBeNil && dc.tlsConfig.Certificates != nil {
-					t.Errorf("DeviceContext.buildConfig() = %v, but should be nil", dc.tlsConfig)
+			if dc.TLSConfig != nil {
+				if tt.shouldBeNil && dc.TLSConfig.Certificates != nil {
+					t.Errorf("DeviceContext.buildConfig() = %v, but should be nil", dc.TLSConfig)
 					return
 				}
-				if dc.tlsConfig != nil && dc.tlsConfig.InsecureSkipVerify != tt.wantInsecureSkipVerify {
-					t.Errorf("DeviceContext.buildConfig() InsecureSkipVerify = %v, wantInsecureSkipVerify %v", dc.tlsConfig.InsecureSkipVerify, tt.wantInsecureSkipVerify)
+				if dc.TLSConfig != nil && dc.TLSConfig.InsecureSkipVerify != tt.wantInsecureSkipVerify {
+					t.Errorf("DeviceContext.buildConfig() InsecureSkipVerify = %v, wantInsecureSkipVerify %v", dc.TLSConfig.InsecureSkipVerify, tt.wantInsecureSkipVerify)
 					return
 				}
 			} else {

@@ -96,11 +96,11 @@ func makeRESTCall(method string, path string, dc *DeviceContext, data interface{
 	authToken := ""
 	if dc != nil {
 		if dc.TLSClientAuth {
-			if dc.tlsConfig == nil {
+			if dc.TLSConfig == nil {
 				logError("Client certificate is not set")
 				return errors.New("client certificate is not set")
 			}
-			httpTransport.TLSClientConfig = dc.tlsConfig
+			httpTransport.TLSClientConfig = dc.TLSConfig
 		} else {
 			authToken = dc.AuthToken
 		}
