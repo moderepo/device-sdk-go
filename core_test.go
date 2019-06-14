@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestDeviceContext_buildConfig(t *testing.T) {
+func TestDeviceContext_SetPKCS12ClientCertificate(t *testing.T) {
 	type fields struct {
 		DeviceID           uint64
 		AuthToken          string
@@ -84,25 +84,22 @@ func TestDeviceContext_buildConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dc := &DeviceContext{
-				DeviceID:           tt.fields.DeviceID,
-				AuthToken:          tt.fields.AuthToken,
-				TLSClientAuth:      tt.fields.TLSClientAuth,
-				PKCS12FileName:     tt.fields.PKCS12FileName,
-				PKCS12Password:     tt.fields.PKCS12Password,
-				InsecureSkipVerify: tt.fields.InsecureSkipVerify,
+				DeviceID:      tt.fields.DeviceID,
+				AuthToken:     tt.fields.AuthToken,
+				TLSClientAuth: tt.fields.TLSClientAuth,
 			}
-			got, err := dc.buildConfig()
+			err := dc.SetPKCS12ClientCertificate(tt.fields.PKCS12FileName, tt.fields.PKCS12Password, tt.fields.InsecureSkipVerify)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DeviceContext.buildConfig() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if got != nil {
-				if tt.shouldBeNil && got.Certificates != nil {
-					t.Errorf("DeviceContext.buildConfig() = %v, but should be nil", got)
+			if dc.tlsConfig != nil {
+				if tt.shouldBeNil && dc.tlsConfig.Certificates != nil {
+					t.Errorf("DeviceContext.buildConfig() = %v, but should be nil", dc.tlsConfig)
 					return
 				}
-				if got != nil && got.InsecureSkipVerify != tt.wantInsecureSkipVerify {
-					t.Errorf("DeviceContext.buildConfig() InsecureSkipVerify = %v, wantInsecureSkipVerify %v", got.InsecureSkipVerify, tt.wantInsecureSkipVerify)
+				if dc.tlsConfig != nil && dc.tlsConfig.InsecureSkipVerify != tt.wantInsecureSkipVerify {
+					t.Errorf("DeviceContext.buildConfig() InsecureSkipVerify = %v, wantInsecureSkipVerify %v", dc.tlsConfig.InsecureSkipVerify, tt.wantInsecureSkipVerify)
 					return
 				}
 			} else {

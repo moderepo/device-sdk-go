@@ -14,13 +14,16 @@ import (
 )
 
 func main() {
+	// Set TLSClientAuth to true if you use a client certificate instead of auth token.
+	// No need to set authToken if TLSClientAuth is set.
 	dc := &mode.DeviceContext{
-		TLSClientAuth:      true,
-		DeviceID:           0,                    // change this to real device ID
-		PKCS12FileName:     "/etc/xxxxxssss.p12", // change this to PKCS#12 file path
-		PKCS12Password:     "xxxxxxxxxx",         // change this to PKCS#12 password
-		InsecureSkipVerify: true,                 // This should be used only for testing.
+		TLSClientAuth: true,
+		DeviceID:      0, // change this to real device ID
 	}
+
+	// Set client certificate when you set TLSClientAuth to true.
+	// change this to real file name and password
+	dc.SetPKCS12ClientCertificate("/path/to/filename.p12", "password", false)
 
 	// Default MQTT host (mqtt.tinkermode.com) doesn't support TLS Client Authentication.
 	// You need to set MQTT host manually.

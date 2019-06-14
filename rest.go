@@ -3,6 +3,7 @@ package mode
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -95,13 +96,11 @@ func makeRESTCall(method string, path string, dc *DeviceContext, data interface{
 	authToken := ""
 	if dc != nil {
 		if dc.TLSClientAuth {
-			config, err := dc.buildConfig()
-			if err != nil {
-				logError("Read client certificates failed: %s", err.Error())
-				return err
+			if dc.tlsConfig == nil {
+				logError("Client certificate is not set")
+				return errors.New("client certificate is not set")
 			}
-
-			httpTransport.TLSClientConfig = config
+			httpTransport.TLSClientConfig = dc.tlsConfig
 		} else {
 			authToken = dc.AuthToken
 		}

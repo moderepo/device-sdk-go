@@ -99,7 +99,9 @@ func (mc *mqttConn) connect() error {
 	p := packet.NewConnectPacket()
 	p.Version = packet.Version311
 	p.Username = strconv.FormatUint(mc.dc.DeviceID, 10)
-	p.Password = mc.dc.AuthToken
+	if !mc.dc.TLSClientAuth {
+		p.Password = mc.dc.AuthToken
+	}
 	p.CleanSession = true
 
 	if err := mc.sendPacket(p); err != nil {
@@ -537,10 +539,11 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	var config *tls.Config
 	var err error
 	if dc.TLSClientAuth {
-		if config, err = dc.buildConfig(); err != nil {
-			logError("Read client certificates failed: %v", err)
+		if dc.tlsConfig == nil {
+			logError("Client certificate is not set: %v", err)
 			return nil, err
 		}
+		config = dc.tlsConfig
 	}
 
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)

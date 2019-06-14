@@ -125,18 +125,12 @@ type (
 	// If on-demand device provisioning is enabled for your MODE project, you
 	// can call ProvisionDevice to create a new DeviceContext.
 	// If you want to use client certificate instead of AuthToken,
-	// set TLSClientAuth to true and set PKCS12FileName and PKCS12Password.
-	// InsecureSkipVerify controls whether a client verifies server's
-	// certificate chain and host name. If InsecureSkipVerify is true,
-	// TLS accepts any certificate presented by the server and any host name
-	// in that certificate. This should be used only for testing.
+	// set TLSClientAuth to true and call SetPKCS12ClientCertificate function.
 	DeviceContext struct {
-		DeviceID           uint64
-		AuthToken          string
-		TLSClientAuth      bool
-		PKCS12FileName     string
-		PKCS12Password     string
-		InsecureSkipVerify bool
+		DeviceID      uint64
+		AuthToken     string
+		TLSClientAuth bool
+		tlsConfig     *tls.Config
 	}
 
 	// DeviceInfo contains the key information fetched from the MODE API.
@@ -266,23 +260,27 @@ func (dc *DeviceContext) GetInfo() (*DeviceInfo, error) {
 	return d, nil
 }
 
-func (dc *DeviceContext) buildConfig() (*tls.Config, error) {
-	p12Content, err := ioutil.ReadFile(dc.PKCS12FileName)
+// SetPKCS12ClientCertificate set PKCS#12 client certificate to device context.
+// Set fileName and password of the certificate. If insecureSkipVerify is true,
+// TLS accepts any certificate presented by the server and any host name in
+// that certificate. This should be used only for testing.
+func (dc *DeviceContext) SetPKCS12ClientCertificate(fileName string, password string, insecureSkipVerify bool) error {
+	p12Content, err := ioutil.ReadFile(fileName)
 	if err != nil {
 		logError("Read PKCS#12 file failed: %v", err)
-		return nil, err
+		return err
 	}
 
 	p12, err := base64.StdEncoding.DecodeString(string(p12Content))
 	if err != nil {
 		logError("PKCS#12 file should be base64 encoded: %v", err)
-		return nil, err
+		return err
 	}
 
-	blocks, err := pkcs12.ToPEM(p12, dc.PKCS12Password)
+	blocks, err := pkcs12.ToPEM(p12, password)
 	if err != nil {
 		logError("Read PKCS#12 file failed: %v", err)
-		return nil, err
+		return err
 	}
 
 	var pemData []byte
@@ -294,15 +292,15 @@ func (dc *DeviceContext) buildConfig() (*tls.Config, error) {
 	cert, err := tls.X509KeyPair(pemData, pemData)
 	if err != nil {
 		logError("Parse X509KeyPair failed: %v", err)
-		return nil, err
+		return err
 	}
 
-	config := tls.Config{
+	dc.tlsConfig = &tls.Config{
 		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: dc.InsecureSkipVerify,
+		InsecureSkipVerify: insecureSkipVerify,
 	}
 
-	return &config, nil
+	return nil
 }
 
 func (cmd *DeviceCommand) String() string {
