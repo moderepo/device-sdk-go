@@ -94,7 +94,6 @@ func makeRESTCall(method string, path string, dc *DeviceContext, data interface{
 
 	authToken := ""
 	if dc != nil {
-		authToken = dc.AuthToken
 		if dc.TLSClientAuth {
 			config, err := dc.buildConfig()
 			if err != nil {
@@ -103,6 +102,8 @@ func makeRESTCall(method string, path string, dc *DeviceContext, data interface{
 			}
 
 			httpTransport.TLSClientConfig = config
+		} else {
+			authToken = dc.AuthToken
 		}
 	}
 
