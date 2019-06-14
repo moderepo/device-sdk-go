@@ -124,6 +124,12 @@ type (
 	// DeviceID and AuthToken are provisioned using the MODE Developer Console.
 	// If on-demand device provisioning is enabled for your MODE project, you
 	// can call ProvisionDevice to create a new DeviceContext.
+	// If you want to use client certificate instead of AuthToken,
+	// set TLSClientAuth to true and set PKCS12FileName and PKCS12Password.
+	// InsecureSkipVerify controls whether a client verifies server's
+	// certificate chain and host name. If InsecureSkipVerify is true,
+	// TLS accepts any certificate presented by the server and any host name
+	// in that certificate. This should be used only for testing.
 	DeviceContext struct {
 		DeviceID           uint64
 		AuthToken          string
