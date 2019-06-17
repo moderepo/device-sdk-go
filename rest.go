@@ -3,6 +3,7 @@ package mode
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -89,8 +90,21 @@ func makeRESTAuth(authToken string) string {
 	return fmt.Sprintf("ModeCloud %s", authToken)
 }
 
-func makeRESTCall(method string, path string, authToken string, data interface{}, resData interface{}) error {
+func makeRESTCall(method string, path string, dc *DeviceContext, data interface{}, resData interface{}) error {
 	url := makeRESTCallURL(path)
+
+	authToken := ""
+	if dc != nil {
+		if dc.TLSClientAuth {
+			if dc.TLSConfig == nil {
+				logError("Client certificate is not set")
+				return errors.New("client certificate is not set")
+			}
+			httpTransport.TLSClientConfig = dc.TLSConfig
+		} else {
+			authToken = dc.AuthToken
+		}
+	}
 
 	var body io.Reader
 	if data != nil {

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/moderepo/device-sdk-go/mqtt_packet"
+	packet "github.com/moderepo/device-sdk-go/mqtt_packet"
 )
 
 const (
@@ -99,7 +99,9 @@ func (mc *mqttConn) connect() error {
 	p := packet.NewConnectPacket()
 	p.Version = packet.Version311
 	p.Username = strconv.FormatUint(mc.dc.DeviceID, 10)
-	p.Password = mc.dc.AuthToken
+	if !mc.dc.TLSClientAuth {
+		p.Password = mc.dc.AuthToken
+	}
 	p.CleanSession = true
 
 	if err := mc.sendPacket(p); err != nil {
@@ -534,10 +536,20 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 		subs: make(map[string]mqttSubscription),
 	}
 
+	var config *tls.Config
+	var err error
+	if dc.TLSClientAuth {
+		if dc.TLSConfig == nil {
+			logError("Client certificate is not set: %v", err)
+			return nil, err
+		}
+		config = dc.TLSConfig
+	}
+
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
 
 	if mqttTLS {
-		if conn, err := tls.DialWithDialer(mqttDialer, "tcp", addr, nil); err == nil {
+		if conn, err := tls.DialWithDialer(mqttDialer, "tcp", addr, config); err == nil {
 			mc.conn = conn
 		} else {
 			logError("MQTT TLS dialer failed: %s", err.Error())

@@ -1,5 +1,6 @@
 package: github.com/moderepo/device-sdk-go
-import: []
+import:
+- package: golang.org/x/crypto
 testImport:
 - package: github.com/stretchr/testify
   version: ^1.1.4

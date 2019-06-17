@@ -13,11 +13,17 @@ package mode
 
 import (
 	"bytes"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"time"
+
+	"golang.org/x/crypto/pkcs12"
 )
 
 const (
@@ -118,9 +124,13 @@ type (
 	// DeviceID and AuthToken are provisioned using the MODE Developer Console.
 	// If on-demand device provisioning is enabled for your MODE project, you
 	// can call ProvisionDevice to create a new DeviceContext.
+	// If you want to use client certificate instead of AuthToken,
+	// set TLSClientAuth to true and call SetPKCS12ClientCertificate function.
 	DeviceContext struct {
-		DeviceID  uint64
-		AuthToken string
+		DeviceID      uint64
+		AuthToken     string
+		TLSClientAuth bool
+		TLSConfig     *tls.Config
 	}
 
 	// DeviceInfo contains the key information fetched from the MODE API.
@@ -198,7 +208,7 @@ func ProvisionDevice(token string) (*DeviceContext, error) {
 
 	params.Token = token
 
-	if err := makeRESTCall("POST", "/devices", "", &params, &resData); err != nil {
+	if err := makeRESTCall("POST", "/devices", nil, &params, &resData); err != nil {
 		return nil, err
 	}
 
@@ -223,7 +233,7 @@ func (dc *DeviceContext) EnableClaimMode(duration time.Duration) error {
 	params.Claimable = true
 	params.Duration = uint64(duration / time.Second)
 
-	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
+	return makeRESTCall("POST", "/deviceRegistration", dc, &params, nil)
 }
 
 // DisableClaimMode turns off the device's "claim mode", disallowing it to be added
@@ -237,17 +247,60 @@ func (dc *DeviceContext) DisableClaimMode() error {
 	params.DeviceID = dc.DeviceID
 	params.Claimable = false
 
-	return makeRESTCall("POST", "/deviceRegistration", dc.AuthToken, &params, nil)
+	return makeRESTCall("POST", "/deviceRegistration", dc, &params, nil)
 }
 
 // GetInfo fetches the device's information from MODE.
 func (dc *DeviceContext) GetInfo() (*DeviceInfo, error) {
 	d := &DeviceInfo{}
-	if err := makeRESTCall("GET", fmt.Sprintf("/devices/%d", dc.DeviceID), dc.AuthToken, nil, d); err != nil {
+	if err := makeRESTCall("GET", fmt.Sprintf("/devices/%d", dc.DeviceID), dc, nil, d); err != nil {
 		return nil, err
 	}
 
 	return d, nil
+}
+
+// SetPKCS12ClientCertificate set PKCS#12 client certificate to device context.
+// Set fileName and password of the certificate. If insecureSkipVerify is true,
+// TLS accepts any certificate presented by the server and any host name in
+// that certificate. This should be used only for testing.
+func (dc *DeviceContext) SetPKCS12ClientCertificate(fileName string, password string, insecureSkipVerify bool) error {
+	p12Content, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		logError("Read PKCS#12 file failed: %v", err)
+		return err
+	}
+
+	p12, err := base64.StdEncoding.DecodeString(string(p12Content))
+	if err != nil {
+		logError("PKCS#12 file should be base64 encoded: %v", err)
+		return err
+	}
+
+	blocks, err := pkcs12.ToPEM(p12, password)
+	if err != nil {
+		logError("Read PKCS#12 file failed: %v", err)
+		return err
+	}
+
+	var pemData []byte
+	for _, b := range blocks {
+		pemData = append(pemData, pem.EncodeToMemory(b)...)
+	}
+
+	// then use PEM data for tls to construct tls certificate:
+	cert, err := tls.X509KeyPair(pemData, pemData)
+	if err != nil {
+		logError("Parse X509KeyPair failed: %v", err)
+		return err
+	}
+
+	dc.TLSConfig = &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: insecureSkipVerify,
+	}
+
+	return nil
 }
 
 func (cmd *DeviceCommand) String() string {
