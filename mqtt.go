@@ -483,7 +483,8 @@ func (mc *mqttConn) writeBulkData(b *DeviceSyncedBulkData) error {
 				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
 				return nil
 			}
-			return errors.New("received wrong ack packet ID")
+			logInfo("[MQTT] writeBulkData() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
+				ack.PacketID, p.PacketID)
 		}
 
 		p.Dup = true
