@@ -560,9 +560,10 @@ func SendBulkData(streamID string, blob []byte, qos QOSLevel) error {
 	return err
 }
 
-// WriteBulkData write guarantee method to TSDB.
-// It returns an error if the device connection session is in idle or recovery state or
-// nothing ack until timeout from MODE cloud.
+// WriteBulkData is similar to SendBulkData, but instead of queueing up the data,
+// this funciton will block until the data has been successfully sent at least once (QoS1).
+// It returns an error if the device connection session is in idle or recovery state,
+// or if the data cannot be sent after several retries.
 func WriteBulkData(streamID string, blob []byte) error {
 	response := make(chan error, 1)
 	ctrl := &sessCtrlWriteBulkData{
