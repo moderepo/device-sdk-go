@@ -383,29 +383,32 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 		Payload: payload,
 	}
 
-	for count := uint(1); count <= maxDeviceEventAttempts; count++ {
-		mc.outPacket <- p
+	mc.outPacket <- p
 
-		if e.qos == QOSAtMostOnce {
+	logInfo("[MQTT] event delivery for packet ID %d", p.PacketID)
+
+	if e.qos == QOSAtMostOnce {
+		return nil
+	}
+
+	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
+
+	select {
+	case <-time.After(deviceEventRetryInterval):
+		msg := fmt.Sprintf("did not receive PUBACK of event delivery for packet ID %d", p.PacketID)
+		logError("[MQTT] %s", msg)
+		mc.reportError(fmt.Errorf("event delivery timeout: %s", msg))
+
+	case ack := <-mc.puback:
+		if ack.PacketID == p.PacketID {
+			logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
 			return nil
 		}
 
-		logInfo("[MQTT] event delivery attempt #%d for packet ID %d", count, p.PacketID)
-		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-		select {
-		case <-time.After(deviceEventRetryInterval):
-			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, deviceEventRetryInterval)
-
-		case ack := <-mc.puback:
-			if ack.PacketID == p.PacketID {
-				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-				return nil
-			}
-			// TBD: Something is really wrong if packet ID does not match. What to do?
-		}
-
-		p.Dup = true
+		msg := fmt.Sprintf("sendEvent() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
+			ack.PacketID, p.PacketID)
+		logInfo("[MQTT] %s", msg)
+		mc.reportError(fmt.Errorf("event delivery unmatched Ack Packet: %s", msg))
 	}
 
 	return errors.New("event dropped")
@@ -431,29 +434,31 @@ func (mc *mqttConn) sendBulkData(b *DeviceBulkData) error {
 		Payload: b.Blob,
 	}
 
-	for count := uint(1); count <= maxDeviceEventAttempts; count++ {
-		mc.outPacket <- p
+	mc.outPacket <- p
 
-		if b.qos == QOSAtMostOnce {
+	logInfo("[MQTT] bulk data delivery packet ID %d", p.PacketID)
+	if b.qos == QOSAtMostOnce {
+		return nil
+	}
+
+	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
+
+	select {
+	case <-time.After(deviceEventRetryInterval):
+		msg := fmt.Sprintf("did not receive PUBACK of bulk data delivery for packet ID %d", p.PacketID)
+		logError("[MQTT] %s", msg)
+		mc.reportError(fmt.Errorf("bulk data delivery timeout: %s", msg))
+
+	case ack := <-mc.puback:
+		if ack.PacketID == p.PacketID {
+			logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
 			return nil
 		}
 
-		logInfo("[MQTT] bulk data delivery attempt #%d for packet ID %d", count, p.PacketID)
-		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-		select {
-		case <-time.After(deviceEventRetryInterval):
-			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, deviceEventRetryInterval)
-
-		case ack := <-mc.puback:
-			if ack.PacketID == p.PacketID {
-				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-				return nil
-			}
-			// TBD: Something is really wrong if packet ID does not match. What to do?
-		}
-
-		p.Dup = true
+		msg := fmt.Sprintf("sendBulkData() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
+			ack.PacketID, p.PacketID)
+		logInfo("[MQTT] %s", msg)
+		mc.reportError(fmt.Errorf("bulk data delivery unmatched Ack Packet: %s", msg))
 	}
 
 	return errors.New("bulk data dropped")
@@ -468,26 +473,27 @@ func (mc *mqttConn) writeBulkData(b *DeviceSyncedBulkData) error {
 		Payload: b.Blob,
 	}
 
-	for count := uint(1); count <= maxSyncedBulkDataAttempts; count++ {
-		mc.outPacket <- p
+	mc.outPacket <- p
 
-		logInfo("[MQTT] synced bulk data delivery attempt #%d for packet ID %d", count, p.PacketID)
-		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
+	logInfo("[MQTT] synced bulk data delivery packet ID %d", p.PacketID)
+	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
 
-		select {
-		case <-time.After(syncedBuldDataRetryInterval):
-			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, syncedBuldDataRetryInterval)
+	select {
+	case <-time.After(syncedBulkDataRetryInterval):
+		msg := fmt.Sprintf("did not receive PUBACK of synced bulk data delivery for packet ID %d", p.PacketID)
+		logError("[MQTT] %s", msg)
+		mc.reportError(fmt.Errorf("synced bulk data delivery timeout: %s", msg))
 
-		case ack := <-mc.puback:
-			if ack.PacketID == p.PacketID {
-				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-				return nil
-			}
-			logInfo("[MQTT] writeBulkData() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
-				ack.PacketID, p.PacketID)
+	case ack := <-mc.puback:
+		if ack.PacketID == p.PacketID {
+			logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
+			return nil
 		}
 
-		p.Dup = true
+		msg := fmt.Sprintf("writeBulkData() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
+			ack.PacketID, p.PacketID)
+		logInfo("[MQTT] %s", msg)
+		mc.reportError(fmt.Errorf("synced bulk data delivery unmatched Ack Packet: %s", msg))
 	}
 
 	return errors.New("did not receive ack packet until timeout and bulk data dropped")
