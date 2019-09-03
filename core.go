@@ -59,10 +59,8 @@ var (
 	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
 
 	// For publishing device events to cloud.
-	maxDeviceEventAttempts      uint = 3
-	deviceEventRetryInterval         = time.Second * 5
-	maxSyncedBulkDataAttempts   uint = 3
-	syncedBuldDataRetryInterval      = time.Second * 5
+	deviceEventRetryInterval    = time.Second * 15
+	syncedBulkDataRetryInterval = time.Second * 15
 
 	// For publishing key-value events to cloud.
 	maxKeyValueUpdateAttempts   uint = 3
@@ -103,11 +101,18 @@ func SetErrorLogger(l *log.Logger) {
 	errorLogger = l
 }
 
+// Deprecated: Use ConfigureDeviceEventTimeout
 // ConfigureDeviceEventSender overrides the default parameters used by the
 // device event sender. These config parameters are used when sending device
 // events with QoS1 (at least once).
-func ConfigureDeviceEventSender(maxAttempts uint, retryInterval time.Duration) {
-	maxDeviceEventAttempts = maxAttempts
+func ConfigureDeviceEventSender(_ uint, retryInterval time.Duration) {
+	deviceEventRetryInterval = retryInterval
+}
+
+// ConfigureDeviceEventTimeout overrides the default parameters used by the
+// timeout of device event sender. These config parameters are used when sending device
+// events with QoS1 (at least once).
+func ConfigureDeviceEventTimeout(retryInterval time.Duration) {
 	deviceEventRetryInterval = retryInterval
 }
 
