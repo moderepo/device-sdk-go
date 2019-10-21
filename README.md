@@ -3,22 +3,23 @@
 [![GoDoc](https://godoc.org/github.com/moderepo/device-sdk-go?status.svg)](https://godoc.org/github.com/moderepo/device-sdk-go)
 
 This SDK is for anyone implementing MODE device drivers in the Go language. It is
-being released as a public Go package that provides a Go API for devices to interact with the MODE cloud.
+being released as a public Go module that provides a Go API for devices to interact with the MODE cloud.
 
 
 ## Installation
 
-You can install this package simply by doing:
+Our recommendation is to use the package as a module. Go will automatically
+install the package when it sees that it is required, but if you haven't
+initialized your package as a module to consume the the module:
+
+    $ go mod init <your package>
+
+This will allow go you to download and install the module at build or run time.
+
+If you are not yet using go modules and are still in GOPATH mode, you may use
+'go get' to fetch the SDK:
 
     $ go get github.com/moderepo/device-sdk-go
-
-However, we strongly recommend you use [Glide](https://glide.sh/) to manage your
-package dependencies. This package comes with its own `glide.yaml` file so that
-the secondary dependencies are taken care of. To use Glide to install this package,
-simply do:
-
-    $ glide get github.com/moderepo/device-sdk-go
-
 
 ## Using the SDK
 
