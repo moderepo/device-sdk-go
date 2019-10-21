@@ -24,7 +24,7 @@ If you are not yet using Go modules and are still in GOPATH mode, you may use
 
 ## Using the SDK
 
-The package name is `mode` does not match the import path. For example:
+The package name is `mode` (which does not match the import path). For example:
 ```golang
     package main
 
