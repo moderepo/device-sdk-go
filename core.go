@@ -3,7 +3,7 @@ This package provides a Go API for devices to interact with the MODE cloud.
 
 If a device wants to receive commands from and send events to the MODE cloud,
 it must start a connection session. Connection session is also required for the
-device to use the Deivce Data Proxy (device key-value store) feature.
+device to use the Device Data Proxy (device key-value store) feature.
 
 Both incoming commands and outgoing events are queued. If the connection is
 disrupted, commands already in the queue will be processed. Likewise,
