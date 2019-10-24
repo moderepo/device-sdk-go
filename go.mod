@@ -1,4 +1,4 @@
-module github.com/moderepo/device-sdk-go
+module github.com/moderepo/device-sdk-go/v2
 
 go 1.12
 
