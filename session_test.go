@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	packet "github.com/moderepo/device-sdk-go/mqtt_packet"
+	packet "github.com/moderepo/device-sdk-go/v2/mqtt_packet"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/moderepo/device-sdk-go"
+	"github.com/moderepo/device-sdk-go/v2"
 )
 
 func doEcho(_ *mode.DeviceContext, cmd *mode.DeviceCommand) {
