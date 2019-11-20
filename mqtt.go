@@ -1,12 +1,17 @@
-package mode
+// MQTT Client the Mode MQTT API
+// The interface is through the MQTTClient struct, which supports the MQTT
+// subset that is required for our devices.
+package client_api
 
 import (
+	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
-	"strconv"
+	"os"
 	"sync"
 	"time"
 
@@ -19,65 +24,545 @@ const (
 
 var mqttDialer = &net.Dialer{Timeout: mqttConnectTimeout}
 
-type (
-	mqttMsgHandler func(*packet.PublishPacket) error
+// QoS level of message delivery. This is used in sending events to MODE.
+type QOSLevel int
 
-	mqttSubscription struct {
-		topic      string
-		msgHandler mqttMsgHandler
-	}
+const (
+	// QoS 0 - message delivery is not guaranteed.
+	QOSAtMostOnce QOSLevel = iota
 
-	mqttConn struct {
-		conn           net.Conn
-		stream         *packet.Stream
-		dc             *DeviceContext
-		packetID       uint16
-		subs           map[string]mqttSubscription
-		command        chan<- *DeviceCommand
-		event          <-chan *DeviceEvent
-		bulkData       <-chan *DeviceBulkData
-		syncedBulkData <-chan *DeviceSyncedBulkData
-		kvSync         chan<- *keyValueSync
-		kvPush         <-chan *keyValueSync
-		err            chan error
-		doPing         chan time.Duration
-		outPacket      chan packet.Packet
-		puback         chan *packet.PubackPacket
-		pingresp       chan *packet.PingrespPacket
-		stopPublisher  chan bool
-		wgWrite        sync.WaitGroup
-		wgRead         sync.WaitGroup
-	}
+	// QoS 1 - message is delivered at least once, but duplicates may happen.
+	QOSAtLeastOnce
+
+	// QoS 2 - message is always delivered exactly once. This is currently not supported.
+	QOSExactlyOnce
 )
 
-func (mc *mqttConn) close() {
-	close(mc.stopPublisher) // tell publisher to quit
-	close(mc.doPing)        // tell pinger to quit
+const (
+	KVSyncActionReload = "reload"
+	KVSyncActionSet    = "set"
+	KVSyncActionDelete = "delete"
+)
 
-	mc.wgWrite.Wait() // wait for event processor and pinger to finish
+type (
+	// Data to send in the channel to the client when we receive data
+	// published for our subscription
+	MqttSubData struct {
+		topic string
+		data  []byte
+	}
 
-	// Attempt graceful disconnect.
-	mc.outPacket <- packet.NewDisconnectPacket()
-	close(mc.outPacket)
+	// Data to send in the channel to the client when we receive the
+	// PUBACK on publish, or an error
+	MqttQueueResult struct {
+		PacketId uint16
+		Err      error
+	}
 
-	mc.wgRead.Wait() // wait for packet reader to finish
+	// For users of MqttClient. Three responsibilities (Oops. single
+	// responsibility, blah blah.):
+	// - data needed to establish a connection
+	// - Callback method to create data to publish
+	// - channels to communicate data back to a receiver.
+	// These methods should be const, since we might call them frequently.
+	// I think this could be broken up - maybe a struct for the channels, with
+	// another interface (and the struct implement the interface if desired).
+	// But this is sufficient for now.
+	MqttDelegate interface {
+		// Returns authentication information
+		AuthInfo() (username string, password string)
+		// Returns the 3 channels on which we will receive information:
+		// spubRecvCh: Data published from our subscriptions
+		// pubAckCh: We will receive MqttPublishID's, which will correspond
+		//   to the return value of Publish()
+		// pingAckCh: True if our ping received an ACK or false if timeout
+		// The delegate is responsible for creating these channels to be of
+		// sufficient size. This is the only mechanism for communicating with
+		// the user. If necessary, the user can create a queue to ensure
+		// that no data is lost.
+		ReceiveChannels() (subRecvCh chan<- MqttSubData,
+			queueAckCh chan<- MqttQueueResult,
+			pingAckCh chan<- bool)
+
+		// How long to wait for requests to finish
+		RequestTimeout() time.Duration
+
+		// Retrieve the topics for this delegate
+		Subscriptions() []string
+
+		// Hook so we can clean up on closing of connections
+		Close()
+	}
+
+	MqttClient struct {
+		// Provides the public API to MQTT. We handle
+		// connect, disconnect, ping (internal)
+		// publish, and subscribe. All functions are synchronous.
+
+		isConnected bool
+		delegate    MqttDelegate
+		conn        *mqttConn
+		wgSend      sync.WaitGroup // wait on sending
+		wgRecv      sync.WaitGroup // wait on receiving
+	}
+
+	// Delegate for the mqqtConn to call back to the MqttClient
+	mqttPubReceiver interface {
+		handlePubReceive(*packet.PublishPacket)
+	}
+
+	// Type alias for something that we use everywhere
+	mqttPacketChan chan packet.Packet
+	// Internal structure used by the client to communicate with the mqttd
+	// server. This is a thin wrapper over the mqtt_packet package.
+	mqttConn struct {
+		// delegate to handle receiving publishes. Of course, achannel would
+		// be an alternate way to do this, but this delegate is currently
+		// just doing some verification and getting the bytes out of the
+		// packet and putting it into a channel, so adding another channel
+		// for that would add unneeded overhead. If circumstances change,
+		// change, we can revisit this decision.
+		PubHandler mqttPubReceiver
+
+		conn   net.Conn
+		stream *packet.Stream
+		// Sequential packet ID. Used to match acks our actions (pub, sub)
+		// excluding connects and pings. We also don't have packet ID's for
+		// receiving pubs from our subscriptions because we didn't initiate them.
+		lastPacketID uint16
+
+		// Channels to respond to clients
+		packIDToChan map[uint16]mqttPacketChan
+		outPktCh     mqttPacketChan
+		connRespCh   mqttPacketChan
+		pingRespCh   chan<- bool
+		queueAckCh   chan<- MqttQueueResult
+
+		mutex sync.Mutex
+	}
+
+	MqttClientError error
+)
+
+// Creates a client and connects. A client is invalid if not connected, and
+// you need to create a new client to reconnect and subscribe
+// a pingInterval of zero means no keepalive pings
+func NewMqttClient(mqttHost string, mqttPort int, tlsConfig *tls.Config,
+	useTLS bool, delegate MqttDelegate) *MqttClient {
+	_, queueAckCh, pingAchCh := delegate.ReceiveChannels()
+	conn := newMqttConn(tlsConfig, mqttHost, mqttPort, useTLS, queueAckCh,
+		pingAchCh)
+	if conn == nil {
+		return nil
+	}
+
+	client := &MqttClient{
+		isConnected: false,
+		delegate:    delegate,
+		conn:        conn,
+	}
+	conn.PubHandler = client
+
+	// We want to pass our WaitGroup's to the connection reader and writer, so
+	// we don't put these in the mqttConn's constructor.
+	go conn.runPacketWriter(&client.wgSend)
+	go conn.runPacketReader(&client.wgRecv)
+
+	// Connect and Subscribe here. These are exposed for now, but we might
+	// want to move them to non-public
+	return client
 }
 
-func (mc *mqttConn) getErrorChan() chan error {
-	return mc.err
+// Const function, but we don't want to pass client by value
+func (client *MqttClient) IsConnected() bool {
+	return client.isConnected
 }
 
-func (mc *mqttConn) ping(timeout time.Duration) {
-	mc.doPing <- timeout
+// exported for now, but pretty sure this needs to be called only from
+// NewMqttclient. This blocks until we get a Connection Ack
+func (client *MqttClient) Connect() error {
+	user, pwd := client.delegate.AuthInfo()
+	p := packet.NewConnectPacket()
+	p.Version = packet.Version311
+	p.Username = user
+	p.Password = pwd
+	p.CleanSession = true
+
+	respChan, err := client.conn.SendPacket(p)
+	if err != nil {
+		logError("[MQTT] failed to send packet: %s", err.Error())
+		return err
+	}
+
+	var pkt packet.Packet
+	if pkt, err = client.receivePacket(respChan); err != nil {
+		logError("[MQTT] failed to receive packet %s", err)
+		return err
+	}
+
+	if pkt.Type() != packet.CONNACK {
+		logError("[MQTT] received unexpected packet %s", pkt.Type())
+		return errors.New("unexpected response")
+	}
+
+	ack := pkt.(*packet.ConnackPacket)
+	if ack.ReturnCode != packet.ConnectionAccepted {
+		return fmt.Errorf("connection failed: %s", ack.ReturnCode.Error())
+	}
+
+	// If we made it here, we consider ourselves connected
+	client.isConnected = true
+
+	return nil
 }
 
-func (mc *mqttConn) sendPacket(p packet.Packet) error {
-	if err := mc.stream.Write(p); err != nil {
+// This blocks until we receive an ACK (really, an EOF) from the server and
+// all our connections are done
+func (client *MqttClient) Disconnect() error {
+	defer func() {
+		client.delegate.Close()
+		client.wgSend.Wait() // wait for packet sender to finish
+
+		// Disconnects don't send a packet. Just make sure we wait for the EOF
+		defer client.wgRecv.Wait()
+	}()
+
+	// Creates a new context, using the client's timeout
+	p := packet.NewDisconnectPacket()
+	_, err := client.conn.SendPacket(p)
+	if err != nil {
+		logError("[MQTT] failed to send packet: %s", err.Error())
+		return err
+	}
+	client.conn.Close()
+
+	return nil
+}
+
+// Add the subscriptions from the delegate
+func (client *MqttClient) Subscribe() error {
+	p := packet.NewSubscribePacket()
+	p.Subscriptions = make([]packet.Subscription, 0, 10)
+
+	subs := client.delegate.Subscriptions()
+	for _, sub := range subs {
+		// We have no protection to keep you from subscribing to the same
+		// topic multiple times. Maybe we should? Maybe the server would send
+		// us 2 messages then for each topic?
+		logInfo("[MQTT] subscribing to topic %s", sub)
+		p.Subscriptions = append(p.Subscriptions, packet.Subscription{
+			Topic: sub,
+			// MODE only supports QoS0 for subscriptions
+			QOS: packet.QOSAtMostOnce,
+		})
+	}
+
+	respChan, err := client.conn.SendPacket(p)
+	if err != nil {
+		logError("[MQTT] failed to send packet: %s", err.Error())
+		return err
+	}
+
+	var pkt packet.Packet
+	if pkt, err = client.receivePacket(respChan); err != nil {
+		return err
+	}
+
+	if pkt.Type() != packet.SUBACK {
+		logError("[MQTT] received unexpected packet %s", pkt.Type())
+		return errors.New("unexpected response")
+	}
+
+	ack := pkt.(*packet.SubackPacket)
+	if len(ack.ReturnCodes) != len(subs) {
+		logError("[MQTT] received SUBACK packet with incorrect number of return codes: expect %d; got %d", len(subs), len(ack.ReturnCodes))
+		return errors.New("invalid packet")
+	}
+
+	for i, code := range ack.ReturnCodes {
+		sub := subs[i]
+
+		if code == packet.QOSFailure {
+			logError("[MQTT] subscription to topic %s rejected", sub)
+			return errors.New("subscription rejected")
+		}
+
+		logInfo("[MQTT] subscription to topic %s succeeded with QOS %v",
+			sub, code)
+	}
+
+	return nil
+}
+
+func (client *MqttClient) Ping() error {
+
+	p := packet.NewPingreqPacket()
+
+	_, err := client.conn.QueuePacket(p, client.delegate.RequestTimeout())
+	if err != nil {
+		logError("[MQTT] failed to send packet: %s", err.Error())
+		return err
+	}
+
+	return nil
+}
+
+func (client *MqttClient) Publish(qos QOSLevel, topic string,
+	data []byte) (uint16, error) {
+
+	var pktQos byte
+	switch qos {
+	case QOSAtMostOnce:
+		pktQos = packet.QOSAtMostOnce
+	case QOSAtLeastOnce:
+		pktQos = packet.QOSAtLeastOnce
+	default:
+		return 0, errors.New("unsupported qos level")
+	}
+
+	p := packet.NewPublishPacket()
+
+	p.Message = packet.Message{
+		Topic:   topic,
+		QOS:     pktQos,
+		Payload: data,
+	}
+	logInfo("Publishing on topic [%s]", p.Message.Topic)
+
+	return client.conn.QueuePacket(p, client.delegate.RequestTimeout())
+}
+
+func (client *MqttClient) receivePacket(respChan mqttPacketChan) (packet.Packet,
+	error) {
+	client.wgRecv.Add(1)
+	defer client.wgRecv.Done()
+
+	ctx, cancel := context.WithTimeout(context.Background(),
+		client.delegate.RequestTimeout())
+	defer cancel()
+
+	// Block on the return channel or timeout
+	select {
+	case pkt := <-respChan:
+		// If this happens, we were blocked on a channel waiting for a packet
+		// and the server closed the connection
+		if pkt == nil {
+			return pkt, errors.New("connection closed")
+		} else {
+			return pkt, nil
+		}
+	case <-ctx.Done():
+		err := ctx.Err()
+		logError("[MQTT] timeout waiting for reply packet %s", err)
+		return nil, err
+	}
+}
+
+// Implementation of the delegate for mqttConn to handle publish from the server
+// on topics that we've subscribed to. We only unpack it and send it to the
+// caller
+func (client *MqttClient) handlePubReceive(p *packet.PublishPacket) {
+	logInfo("[MQTT] received message for topic %s", p.Message.Topic)
+
+	pubData := MqttSubData{p.Message.Topic, p.Message.Payload}
+
+	subRecvCh, _, _ := client.delegate.ReceiveChannels()
+	select {
+	case subRecvCh <- pubData:
+	default:
+		logError("Caller could not receive publish data. Channel full?")
+	}
+}
+
+func newMqttConn(tlsConfig *tls.Config, mqttHost string,
+	mqttPort int, useTLS bool, queueAckCh chan<- MqttQueueResult,
+	pingAckCh chan<- bool) *mqttConn {
+
+	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
+	var conn net.Conn
+	var err error
+	if useTLS {
+		if conn, err = tls.DialWithDialer(mqttDialer, "tcp", addr,
+			tlsConfig); err == nil {
+		} else {
+			logError("MQTT TLS dialer failed: %s", err.Error())
+			return nil
+		}
+	} else {
+		if conn, err = mqttDialer.Dial("tcp", addr); err == nil {
+		} else {
+			logError("MQTT dialer failed: %s", err.Error())
+			return nil
+		}
+	}
+
+	return &mqttConn{
+		conn:   conn,
+		stream: packet.NewStream(conn, conn),
+		// This map will grow to the size of the number of requests that are
+		// unanswered. These block, so a size of 1 is sufficient.
+		packIDToChan: make(map[uint16]mqttPacketChan, 1),
+		// Channel to the mqtt server. This can possibly get backed up on a slow
+		// network. The size of 8 is arbitrary. If it is full, we will block
+		// until a timeout (specified by the delegate) and return an error.
+		outPktCh: make(mqttPacketChan, 8),
+		// Connection requests are blocked, so 1 is sufficient
+		connRespCh: make(mqttPacketChan, 1),
+		// These are created by the delegate, so it's up to them to create
+		// channels of sufficient size or we will fail.
+		pingRespCh: pingAckCh,
+		queueAckCh: queueAckCh,
+	}
+}
+
+func (conn *mqttConn) Close() {
+	conn.closeAllChannels()
+}
+
+// We only queue pings (PINGREQ) and publishes (PUBLISH). Theoretically, we
+// could queue subscribes (SUBSCRIBE) since they have packet ID's like
+// publishes. But, to be able to handle queueing and sending for the same type
+// of packet would make the code overly complicated.
+func (conn *mqttConn) QueuePacket(p packet.Packet,
+	timeout time.Duration) (uint16, error) {
+
+	var packetID uint16
+	switch p.Type() {
+	case packet.PINGREQ:
+		// We send these as is, without adding a packet ID
+	case packet.PUBLISH:
+		pubPkt := p.(*packet.PublishPacket)
+		packetID = conn.getPacketID()
+		pubPkt.PacketID = uint16(packetID)
+	default:
+		logError("[MQTT] Unhandled packet type: %s", p.Type())
+		return 0, fmt.Errorf("Unhandled packet type for queueing")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	select {
+	case conn.outPktCh <- p:
+		// Successfully sent, so nothing to do.
+	case <-ctx.Done():
+		logError("Exceeded timeout sending %s for id %d", p.Type(), packetID)
+		return 0, fmt.Errorf("Send Queue full %s for id %d", p.Type(), packetID)
+	}
+
+	return packetID, nil
+}
+
+// Called by the client to send packets to the server.
+func (conn *mqttConn) SendPacket(p packet.Packet) (mqttPacketChan, error) {
+
+	ch := conn.getResponseChan(p)
+
+	err := conn.writePacket(p)
+
+	return ch, err
+}
+
+func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup) {
+	wg.Add(1)
+	defer func() {
+		logInfo("[MQTT] packet writer is exiting")
+		wg.Done()
+	}()
+
+	// Run until closed
+	for p := range conn.outPktCh {
+		err := conn.writePacket(p)
+		if err != nil {
+			logError("Unable to write out packet %s", p.Type())
+			switch p.Type() {
+			case packet.PINGREQ:
+				conn.pingRespCh <- false
+			case packet.SUBSCRIBE:
+				subPkt := p.(*packet.SubscribePacket)
+				conn.queueAckCh <- MqttQueueResult{subPkt.PacketID, err}
+			case packet.PUBLISH:
+				pubPkt := p.(*packet.PublishPacket)
+				conn.queueAckCh <- MqttQueueResult{pubPkt.PacketID, err}
+			default:
+				// We don't have a packet ID (or did not expect to receive this
+				// packet type and fail in sending it
+				err := fmt.Errorf("Failed to queue packet %s", p.Type())
+				conn.queueAckCh <- MqttQueueResult{0, err}
+			}
+		}
+	}
+}
+
+func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
+	wg.Add(1)
+
+	defer func() {
+		logInfo("[MQTT] packet reader is exiting")
+		wg.Done()
+		// Close the rest of our channels?
+	}()
+
+	for {
+		p, err := conn.stream.Read()
+		if err != nil {
+			if err == io.EOF {
+				// Server disconnected. This happens for 2 reasons:
+				// 1. we disconnect
+				// 2. we don't ping, so the server assumes we're done
+				// XXX we should wait for the EOF before we exit.
+				// In any case, we have to see if upstream this wasn't
+				// expected
+				// it wasn't expected upstream
+				logInfo("[MQTT] server disconnected: %s", err.Error())
+			} else {
+				logError("[MQTT] failed to read packet: %s", err.Error())
+				//conn.reportError(err)
+			}
+			return
+			break
+		}
+		if p.Type() == packet.PUBLISH {
+			// Incoming, received from our subscription. (all outher packets
+			// are outbound.
+			pubPkt := p.(*packet.PublishPacket)
+			conn.PubHandler.handlePubReceive(pubPkt)
+		} else {
+			respChan := conn.getResponseChan(p)
+			if respChan != nil {
+				respChan <- p
+				if p.Type() == packet.SUBACK {
+					subAck := p.(*packet.SubackPacket)
+					delete(conn.packIDToChan, subAck.PacketID)
+					close(respChan)
+				}
+			} else {
+				// Figure out what the packet was. If it's nil, it should
+				// be a response to a queued delivery
+				if p.Type() == packet.PINGRESP {
+					conn.pingRespCh <- true
+				} else if p.Type() == packet.PUBACK {
+					pubAck := p.(*packet.PubackPacket)
+					conn.queueAckCh <- MqttQueueResult{pubAck.PacketID, nil}
+				} else if p.Type() == packet.SUBACK {
+					subAck := p.(*packet.SubackPacket)
+					conn.queueAckCh <- MqttQueueResult{subAck.PacketID, nil}
+				}
+			}
+		}
+	}
+}
+
+func (conn *mqttConn) writePacket(p packet.Packet) error {
+	// Since we have both queued writes, and blocking, we lock at the
+	// lowest level
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	if err := conn.stream.Write(p); err != nil {
 		logError("[MQTT] failed to send %s packet: %s", p.Type(), err.Error())
 		return err
 	}
 
-	if err := mc.stream.Flush(); err != nil {
+	if err := conn.stream.Flush(); err != nil {
 		logError("[MQTT] failed to flush %s packet: %s", p.Type(), err.Error())
 		return err
 	}
@@ -85,532 +570,74 @@ func (mc *mqttConn) sendPacket(p packet.Packet) error {
 	return nil
 }
 
-func (mc *mqttConn) getPacketID() uint16 {
-	mc.packetID += 1
-	if mc.packetID == 0 {
-		mc.packetID = 1
+func (conn *mqttConn) closeAllChannels() {
+
+	for _, v := range conn.packIDToChan {
+		close(v)
 	}
-	return mc.packetID
+
+	close(conn.outPktCh)
+	close(conn.connRespCh)
+	close(conn.pingRespCh)
 }
 
-func (mc *mqttConn) connect() error {
-	logInfo("[MQTT] doing CONNECT handshake...")
-
-	p := packet.NewConnectPacket()
-	p.Version = packet.Version311
-	p.Username = strconv.FormatUint(mc.dc.DeviceID, 10)
-	if !mc.dc.TLSClientAuth {
-		p.Password = mc.dc.AuthToken
+func (conn *mqttConn) getPacketID() uint16 {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	conn.lastPacketID += 1
+	if conn.lastPacketID == 0 {
+		conn.lastPacketID = 1
 	}
-	p.CleanSession = true
-
-	if err := mc.sendPacket(p); err != nil {
-		return err
-	}
-
-	r, err := mc.stream.Read()
-	if err != nil {
-		logError("[MQTT] failed to read from stream: %s", err.Error())
-		return err
-	}
-
-	if r.Type() != packet.CONNACK {
-		logError("[MQTT] received unexpected packet %s", r.Type())
-		return errors.New("unexpected response")
-	}
-
-	ack := r.(*packet.ConnackPacket)
-	if ack.ReturnCode != packet.ConnectionAccepted {
-		return fmt.Errorf("connection failed: %s", ack.ReturnCode.Error())
-	}
-
-	return nil
+	return conn.lastPacketID
 }
 
-func (mc *mqttConn) subscribe(subs []mqttSubscription) error {
-	p := packet.NewSubscribePacket()
-	p.PacketID = mc.getPacketID()
-	p.Subscriptions = make([]packet.Subscription, 0, 10)
-
-	for _, s := range subs {
-		logInfo("[MQTT] subscribing to topic %s", s.topic)
-		p.Subscriptions = append(p.Subscriptions, packet.Subscription{
-			Topic: s.topic,
-			QOS:   packet.QOSAtMostOnce, // MODE only supports QoS0 for subscriptions
-		})
-	}
-
-	if err := mc.sendPacket(p); err != nil {
-		return err
-	}
-
-	r, err := mc.stream.Read()
-	if err != nil {
-		logError("[MQTT] failed to read from stream: %s", err.Error())
-		return err
-	}
-	if r.Type() != packet.SUBACK {
-		logError("[MQTT] received unexpected packet %s", r.Type())
-		return errors.New("unexpected response")
-	}
-
-	ack := r.(*packet.SubackPacket)
-
-	if ack.PacketID != p.PacketID {
-		logError("[MQTT] received SUBACK packet with wrong packet ID")
-		return errors.New("mismatch packet id")
-	}
-
-	if len(ack.ReturnCodes) != len(subs) {
-		logError("[MQTT] received SUBACK packet with incorrect number of return codes: expect %d; got %d", len(subs), len(ack.ReturnCodes))
-		return errors.New("invalid packet")
-	}
-
-	for i, code := range ack.ReturnCodes {
-		s := subs[i]
-
-		if code == packet.QOSFailure {
-			logError("[MQTT] subscription to topic %s rejected", s.topic)
-			return errors.New("subscription rejected")
-		}
-
-		logInfo("[MQTT] subscription to topic %s succeeded with QOS %v", s.topic, code)
-		mc.subs[s.topic] = s
-	}
-
-	return nil
-}
-
-func (mc *mqttConn) handleCommandMsg(p *packet.PublishPacket) error {
-	var cmd struct {
-		Action     string          `json:"action"`
-		Parameters json.RawMessage `json:"parameters"`
-	}
-
-	if err := decodeOpaqueJSON(p.Message.Payload, &cmd); err != nil {
-		return fmt.Errorf("message data is not valid command JSON: %s", err.Error())
-	}
-
-	if cmd.Action == "" {
-		return errors.New("message data is not valid command JSON: no action field")
-	}
-
-	mc.command <- &DeviceCommand{Action: cmd.Action, payload: cmd.Parameters}
-	return nil
-}
-
-func (mc *mqttConn) handleKeyValueMsg(p *packet.PublishPacket) error {
-	var kvSync keyValueSync
-
-	if err := decodeOpaqueJSON(p.Message.Payload, &kvSync); err != nil {
-		return fmt.Errorf("message data is not valid key-value sync JSON: %s", err.Error())
-	}
-
-	if kvSync.Action == "" {
-		return errors.New("message data is not valid key-value sync JSON: no action field")
-	}
-
-	mc.kvSync <- &kvSync
-	return nil
-}
-
-func (mc *mqttConn) handlePublishPacket(p *packet.PublishPacket) {
-	sub, exists := mc.subs[p.Message.Topic]
-	if !exists {
-		logError("[MQTT] received message for invalid topic %s", p.Message.Topic)
-		return
-	}
-
-	logInfo("[MQTT] received message for topic %s", p.Message.Topic)
-
-	if err := sub.msgHandler(p); err != nil {
-		logError("[MQTT] failed to process message: %s", err.Error())
-		return
-	}
-}
-
-func (mc *mqttConn) reportError(err error) {
-	// Report the error without blocking.
-	select {
-	case mc.err <- err:
-		// error sent
+// Returns the appropriate response channel for the channel type. For pubacks,
+// We will either create it or return the one that we stored previous
+func (conn *mqttConn) getResponseChan(p packet.Packet) mqttPacketChan {
+	//logInfo("[MQTT] Fetching response channel for %s\n", p.Type())
+	switch p.Type() {
+	case packet.CONNECT:
+		return conn.connRespCh
+	case packet.DISCONNECT:
+		// Disconnect is a special case. Server will close, so no response, but
+		// it's a packet type we expect, so don't let it fall to default
+		return nil
+	case packet.CONNACK:
+		return conn.connRespCh
+	case packet.SUBSCRIBE:
+		// Subscribes are blocking, but have packet ID's, and, theoretically,
+		// multiples can be sent, so we enable this at this level.
+		subPkt := p.(*packet.SubscribePacket)
+		subPkt.PacketID = conn.getPacketID()
+		returnCh := make(mqttPacketChan)
+		conn.packIDToChan[subPkt.PacketID] = returnCh
+		return returnCh
+	case packet.SUBACK:
+		// It's possible the SUBACK doesn't have a response channel if it
+		// was queued. In that case, we'll return a nil and handle it like
+		// PINGREQ or PUBACK
+		subAck := p.(*packet.SubackPacket)
+		return conn.packIDToChan[subAck.PacketID]
+	case packet.PUBLISH, packet.PINGREQ, packet.PUBACK, packet.PINGRESP:
+		// Since we have to respond differently to these, but we don't
+		// want to show an error
+		return nil
 	default:
-		logError("[MQTT] error not propagated because channel is blocked.")
-	}
-}
-
-func (mc *mqttConn) runPacketReader() {
-	logInfo("[MQTT] packet reader is running")
-	mc.wgRead.Add(1)
-
-	defer func() {
-		logInfo("[MQTT] packet reader is exiting")
-		mc.wgRead.Done()
-	}()
-
-	for {
-		p, err := mc.stream.Read()
-		if err != nil {
-			logError("[MQTT] failed to read packet: %s", err.Error())
-			mc.reportError(err)
-			break
-		}
-
-		switch p.Type() {
-		case packet.PUBLISH:
-			mc.handlePublishPacket(p.(*packet.PublishPacket))
-
-		case packet.PUBACK:
-			mc.puback <- p.(*packet.PubackPacket)
-
-		case packet.PINGRESP:
-			mc.pingresp <- p.(*packet.PingrespPacket)
-
-		default:
-			logError("[MQTT] received unhandled packet %v", p)
-		}
-	}
-}
-
-func (mc *mqttConn) runPacketWriter() {
-	logInfo("[MQTT] packet writer is running")
-	defer func() {
-		logInfo("[MQTT] packet writer is exiting")
-		/*
-			Closing the network connection here should cause any blocking read()
-			call to fail, thus forcing the reader to exit. But sometimes the read
-			operation may be stuck if there is some network issue. Setting a read
-			deadline here may force the read() call to fail.
-		*/
-		mc.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 500))
-		mc.conn.Close()
-	}()
-
-	for p := range mc.outPacket {
-		if err := mc.sendPacket(p); err == nil {
-			logInfo("[MQTT] successfully sent %s packet", p.Type())
-		} else {
-			logError("[MQTT] failed to send %s packet: %s", p.Type(), err.Error())
-			mc.reportError(err)
-			// We don't need "break" here because we have to vacuum outPacket until the session is closed.
-		}
-	}
-}
-
-func (mc *mqttConn) runPinger() {
-	logInfo("[MQTT] pinger is running")
-	mc.wgWrite.Add(1)
-
-	defer func() {
-		logInfo("[MQTT] pinger is exiting")
-		mc.wgWrite.Done()
-	}()
-
-	for pingTimeout := range mc.doPing {
-		mc.outPacket <- packet.NewPingreqPacket()
-
-		logInfo("[MQTT] waiting for PINGRESP packet")
-
-		select {
-		case <-time.After(pingTimeout):
-			logError("[MQTT] did not receive PINGRESP packet within %v", pingTimeout)
-			mc.reportError(errors.New("ping timeout"))
-
-		case <-mc.pingresp:
-			logInfo("[MQTT] received PINGRESP packet")
-		}
-	}
-}
-
-func (mc *mqttConn) runPublisher() {
-	logInfo("[MQTT] publisher is running")
-	mc.wgWrite.Add(1)
-
-	defer func() {
-		logInfo("[MQTT] publisher is exiting")
-		mc.wgWrite.Done()
-	}()
-
-	for {
-		select {
-		case <-mc.stopPublisher:
-			return
-
-		case e := <-mc.event:
-			if err := mc.sendEvent(e); err != nil {
-				logError("[MQTT] publisher failed to send event: %s", err.Error())
-			}
-
-		case b := <-mc.bulkData:
-			if err := mc.sendBulkData(b); err != nil {
-				logError("[MQTT] publisher failed to send bulkData: %s", err.Error())
-			}
-
-		case sb := <-mc.syncedBulkData:
-			err := mc.writeBulkData(sb)
-			if err != nil {
-				logError("[MQTT] publisher failed to write bulkData: %s", err.Error())
-			}
-			sb.response <- err
-
-		case kvSync := <-mc.kvPush:
-			if err := mc.sendKeyValueUpdate(kvSync); err != nil {
-				logError("[MQTT] publisher failed to send key-value update: %s", err.Error())
-			}
-		}
-	}
-}
-
-func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
-	var qos byte
-
-	switch e.qos {
-	case QOSAtMostOnce:
-		qos = packet.QOSAtMostOnce
-	case QOSAtLeastOnce:
-		qos = packet.QOSAtLeastOnce
-	default:
-		return errors.New("unsupported qos level")
-	}
-
-	payload, _ := json.Marshal(e)
-
-	p := packet.NewPublishPacket()
-	p.PacketID = mc.getPacketID()
-	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/event", mc.dc.DeviceID),
-		QOS:     qos,
-		Payload: payload,
-	}
-
-	mc.outPacket <- p
-
-	logInfo("[MQTT] event delivery for packet ID %d", p.PacketID)
-
-	if e.qos == QOSAtMostOnce {
+		//
+		logError("[MQTT] Unhandled packet type: %s", p.Type())
 		return nil
 	}
-
-	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-	select {
-	case <-time.After(deviceEventRetryInterval):
-		msg := fmt.Sprintf("did not receive PUBACK of event delivery for packet ID %d", p.PacketID)
-		logError("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("event delivery timeout: %s", msg))
-
-	case ack := <-mc.puback:
-		if ack.PacketID == p.PacketID {
-			logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-			return nil
-		}
-
-		msg := fmt.Sprintf("sendEvent() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
-			ack.PacketID, p.PacketID)
-		logInfo("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("event delivery unmatched Ack Packet: %s", msg))
-	}
-
-	return errors.New("event dropped")
 }
 
-func (mc *mqttConn) sendBulkData(b *DeviceBulkData) error {
-	var qos byte
+var (
+	infoLogger  = log.New(os.Stdout, "[MODE - INFO] ", log.LstdFlags)
+	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
+)
 
-	switch b.qos {
-	case QOSAtMostOnce:
-		qos = packet.QOSAtMostOnce
-	case QOSAtLeastOnce:
-		qos = packet.QOSAtLeastOnce
-	default:
-		return errors.New("unsupported qos level")
-	}
-
-	p := packet.NewPublishPacket()
-	p.PacketID = mc.getPacketID()
-	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/bulkData/%s", mc.dc.DeviceID, b.StreamID),
-		QOS:     qos,
-		Payload: b.Blob,
-	}
-
-	mc.outPacket <- p
-
-	logInfo("[MQTT] bulk data delivery packet ID %d", p.PacketID)
-	if b.qos == QOSAtMostOnce {
-		return nil
-	}
-
-	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-	select {
-	case <-time.After(deviceEventRetryInterval):
-		msg := fmt.Sprintf("did not receive PUBACK of bulk data delivery for packet ID %d", p.PacketID)
-		logError("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("bulk data delivery timeout: %s", msg))
-
-	case ack := <-mc.puback:
-		if ack.PacketID == p.PacketID {
-			logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-			return nil
-		}
-
-		msg := fmt.Sprintf("sendBulkData() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
-			ack.PacketID, p.PacketID)
-		logInfo("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("bulk data delivery unmatched Ack Packet: %s", msg))
-	}
-
-	return errors.New("bulk data dropped")
+func logInfo(format string, values ...interface{}) {
+	infoLogger.Printf(format+"\n", values...)
 }
 
-func (mc *mqttConn) writeBulkData(b *DeviceSyncedBulkData) error {
-	p := packet.NewPublishPacket()
-	p.PacketID = mc.getPacketID()
-	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/bulkData/%s", mc.dc.DeviceID, b.StreamID),
-		QOS:     packet.QOSAtLeastOnce,
-		Payload: b.Blob,
-	}
-
-	mc.outPacket <- p
-
-	logInfo("[MQTT] synced bulk data delivery packet ID %d", p.PacketID)
-	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-	select {
-	case <-time.After(syncedBulkDataRetryInterval):
-		msg := fmt.Sprintf("did not receive PUBACK of synced bulk data delivery for packet ID %d", p.PacketID)
-		logError("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("synced bulk data delivery timeout: %s", msg))
-
-	case ack := <-mc.puback:
-		if ack.PacketID == p.PacketID {
-			logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-			return nil
-		}
-
-		msg := fmt.Sprintf("writeBulkData() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
-			ack.PacketID, p.PacketID)
-		logInfo("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("synced bulk data delivery unmatched Ack Packet: %s", msg))
-	}
-
-	return errors.New("did not receive ack packet until timeout and bulk data dropped")
-}
-
-func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
-	// Always QoS1
-	qos := packet.QOSAtLeastOnce
-
-	payload, _ := json.Marshal(kvSync)
-
-	p := packet.NewPublishPacket()
-	p.PacketID = mc.getPacketID()
-	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/kv", mc.dc.DeviceID),
-		QOS:     qos,
-		Payload: payload,
-	}
-
-	for count := uint(1); count <= maxKeyValueUpdateAttempts; count++ {
-		mc.outPacket <- p
-
-		logInfo("[MQTT] key-value update attempt #%d for packet ID %d", count, p.PacketID)
-		logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-		select {
-		case <-time.After(keyValueUpdateRetryInterval):
-			logError("[MQTT] did not receive PUBACK for packet ID %d within %v", p.PacketID, keyValueUpdateRetryInterval)
-
-		case ack := <-mc.puback:
-			if ack.PacketID == p.PacketID {
-				logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-				return nil
-			}
-			// TBD: Something is really wrong if packet ID does not match. What to do?
-		}
-
-		p.Dup = true
-	}
-
-	return errors.New("key-value update dropped")
-}
-
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, evtBulkDataQueue <-chan *DeviceBulkData, evtSyncedBulkDataCh <-chan *DeviceSyncedBulkData, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
-	mc := &mqttConn{
-		dc:   dc,
-		subs: make(map[string]mqttSubscription),
-	}
-
-	var config *tls.Config
-	var err error
-	if dc.TLSClientAuth {
-		if dc.TLSConfig == nil {
-			logError("Client certificate is not set: %v", err)
-			return nil, err
-		}
-		config = dc.TLSConfig
-	}
-
-	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
-
-	if mqttTLS {
-		if conn, err := tls.DialWithDialer(mqttDialer, "tcp", addr, config); err == nil {
-			mc.conn = conn
-		} else {
-			logError("MQTT TLS dialer failed: %s", err.Error())
-			return nil, err
-		}
-	} else {
-		if conn, err := mqttDialer.Dial("tcp", addr); err == nil {
-			mc.conn = conn
-		} else {
-			logError("MQTT dialer failed: %s", err.Error())
-			return nil, err
-		}
-	}
-
-	mc.stream = packet.NewStream(mc.conn, mc.conn)
-
-	if err := mc.connect(); err != nil {
-		mc.conn.Close()
-		return nil, err
-	}
-
-	subs := []mqttSubscription{
-		mqttSubscription{
-			topic:      fmt.Sprintf("/devices/%d/command", mc.dc.DeviceID),
-			msgHandler: mc.handleCommandMsg,
-		},
-		mqttSubscription{
-			topic:      fmt.Sprintf("/devices/%d/kv", mc.dc.DeviceID),
-			msgHandler: mc.handleKeyValueMsg,
-		},
-	}
-
-	if err := mc.subscribe(subs); err != nil {
-		mc.conn.Close()
-		return nil, err
-	}
-
-	mc.command = cmdQueue
-	mc.event = evtQueue
-	mc.bulkData = evtBulkDataQueue
-	mc.syncedBulkData = evtSyncedBulkDataCh
-	mc.kvSync = kvSyncQueue
-	mc.kvPush = kvPushQueue
-	mc.doPing = make(chan time.Duration, 1)
-	mc.stopPublisher = make(chan bool)
-	mc.err = make(chan error, 1)
-	mc.outPacket = make(chan packet.Packet, 1)
-	mc.puback = make(chan *packet.PubackPacket, 10)     // make sure this won't block
-	mc.pingresp = make(chan *packet.PingrespPacket, 10) // make sure this won't block
-
-	go mc.runPacketReader()
-	go mc.runPacketWriter()
-	go mc.runPublisher()
-	go mc.runPinger()
-
-	return mc, nil
+func logError(format string, values ...interface{}) {
+	errorLogger.Printf(format+"\n", values...)
 }

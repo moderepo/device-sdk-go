@@ -5,82 +5,169 @@ command.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
-	mode "github.com/moderepo/device-sdk-go/v2"
+	"github.com/moderepo/device-sdk-go/v2"
 )
 
-func doEcho(_ *mode.DeviceContext, cmd *mode.DeviceCommand) {
-	// Command parameters are JSON encoded and can be retrieved as follows.
-	var params struct {
-		Msg string `json:"msg"`
+var (
+	// My cloudmqtt.com server)
+	modeMqttHost = "staging-api.corp.tinkermode.com"
+	modeMqttPort = 8883
+	modeUseTLS   = true
+)
+
+func pingLoop(client *client_api.MqttClient, timeout time.Duration,
+	pingRecv <-chan bool, gotDisconnected chan<- bool, doDisconnect <-chan bool,
+	wg sync.WaitGroup) {
+
+	wg.Add(1)
+	defer func() {
+		fmt.Println("Exiting ping loop")
+		wg.Done()
+	}()
+	ticker := time.NewTicker(3 * time.Second)
+
+	for {
+		if err := client.Ping(); err != nil {
+			gotDisconnected <- true
+			return
+		}
+
+		// Wait for the ack, or timeout
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		// Block on the return channel or timeout
+		select {
+		case <-doDisconnect:
+			fmt.Println("runner told me to exit")
+			return
+		case ret := <-pingRecv:
+			// There's not really a way to return false, but, since it's bool,
+			// we'll check
+			fmt.Println("Got ping response")
+			if !ret {
+				fmt.Println("sender closed ping channel")
+				gotDisconnected <- true
+			}
+		case <-ctx.Done():
+			fmt.Println("ping timeout")
+			gotDisconnected <- true
+		}
+
+		fmt.Println("Ping sent and ack'ed")
+		// Wait for the timer to before we loop again
+		<-ticker.C
+	}
+}
+
+func waitForAck(delegate *client_api.ModeMqttDelegate) uint16 {
+	// Wait for the ack, or timeout
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Second)
+	defer cancel()
+
+	// Block on the return channel or timeout
+	select {
+	case queueRes := <-delegate.QueueAckCh:
+		if queueRes.Err != nil {
+			fmt.Printf("Queued request failed: %s\n", queueRes.Err)
+		} else {
+			return queueRes.PacketId
+		}
+	case <-ctx.Done():
+		fmt.Printf("Ack response timeout: %s\n", ctx.Err())
 	}
 
-	if err := cmd.BindParameters(&params); err != nil {
-		fmt.Printf("Failed to bind command parameters: %s\n", err.Error())
-		return
-	}
+	return 0
+}
 
-	eventData := map[string]interface{}{"msg": params.Msg}
+func receiveCommands(cmdChannel chan *client_api.DeviceCommand,
+	delegate *client_api.ModeMqttDelegate, client *client_api.MqttClient) {
 
-	if err := mode.SendEvent("echo", eventData, mode.QOSAtLeastOnce); err != nil {
-		fmt.Printf("Failed to send event: %s\n", err.Error())
+	for cmd := range cmdChannel {
+		switch cmd.Action {
+		case "doEcho":
+			var params struct {
+				Msg string `json:"msg"`
+			}
+
+			if err := cmd.BindParameters(&params); err != nil {
+				fmt.Printf("Failed to bind command parameters: %s\n", err.Error())
+				return
+			}
+
+			event := client_api.DeviceEvent{
+				EventType: "echo",
+				EventData: map[string]interface{}{"msg": params.Msg},
+				Qos:       client_api.QOSAtLeastOnce,
+			}
+
+			_, err := client.PublishEvent(event)
+			if err != nil {
+				fmt.Printf("Failed to send event: %s\n", err.Error())
+			}
+			waitForAck(delegate)
+			fmt.Println("ACK received from echo")
+		}
 	}
 }
 
 func main() {
-	// Set TLSClientAuth to true if you use a client certificate instead of auth token.
-	// No need to set authToken if TLSClientAuth is set.
-	dc := &mode.DeviceContext{
-		TLSClientAuth: true,
-		DeviceID:      0, // change this to real device ID
-	}
+	var pingWg sync.WaitGroup
 
+	dc := &client_api.DeviceContext{
+		DeviceID:      6040,
+		AuthToken:     "v1.ZHw2MDQw.1569621662.113e3dd1c0d5024816a41c0264fa0a734dfe31db218da0a480ceceee9961123348dc1aaf563480108b6f438c0710bbe244972f979e2ee08164a5d9c4c8a306d0633a96bff4edaec9",
+		TLSClientAuth: true,
+	}
 	// Set client certificate when you set TLSClientAuth to true.
 	// change this to real file name and password
-	dc.SetPKCS12ClientCertificate("/path/to/filename.p12", "password", false)
+	dc.SetPKCS12ClientCertificate("fixtures/client1.p12", "pwd", true)
 
-	// Default REST host (api.tinkermode.com) doesn't support TLS Client Authentication.
-	// You need to set REST host manually.
-	restHost := "xxxxxxx.corp.tinkermode.com" // change this to real REST host
-	restPort := 7002                          // change this to real REST port
-	mode.SetRESTHostPort(restHost, restPort, true)
+	cmdQueue := make(chan *client_api.DeviceCommand, 16)
+	kvSyncQueue := make(chan *client_api.KeyValueSync, 16)
+	delegate := client_api.NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue)
 
-	// Default MQTT host (mqtt.tinkermode.com) doesn't support TLS Client Authentication.
-	// You need to set MQTT host manually.
-	mqttHost := "xxxxxxx.corp.tinkermode.com" // change this to real MQTT host
-	mqttPort := 1883                          // change this to real MQTT port
-	mode.SetMQTTHostPort(mqttHost, mqttPort, true)
-
-	mode.SetCommandHandler("doEcho", doEcho)
-
-	mode.SetDefaultCommandHandler(func(_ *mode.DeviceContext, cmd *mode.DeviceCommand) {
-		fmt.Printf("Received unknown command %s\n", cmd.Action)
-	})
-
-	mode.SetSessionStateCallback(func(state mode.SessionState) {
-		fmt.Printf("Session state changed to %v\n", state)
-	})
-
-	if d, err := dc.GetInfo(); err == nil {
-		fmt.Printf("Running as device %v\n", d)
-	} else {
-		fmt.Printf("Failed to get device info: %s\n", err.Error())
+	client := client_api.NewMqttClient(modeMqttHost, modeMqttPort, nil,
+		modeUseTLS, delegate)
+	if err := client.Connect(); err != nil {
+		fmt.Printf("Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
 		os.Exit(1)
 	}
 
-	if err := mode.StartSession(dc); err != nil {
-		fmt.Printf("Failed to start session: %s\n", err.Error())
-		os.Exit(1)
+	// Start listening for the subscriptions before we subscribe and listen on
+	// the channel that the listener sends to
+	go delegate.RunSubscriptionListener()
+	go receiveCommands(cmdQueue, &delegate, client)
+	if err := client.Subscribe(); err != nil {
+		fmt.Printf("failed to subscribe: %s\n", err)
 	}
+
+	stopPingCh := make(chan bool)
+	pingFailCh := make(chan bool)
+
+	// Run the ping loop to keep alive while we wait for the "doEcho" command
+	go pingLoop(client, 5*time.Second, delegate.PingAckCh, pingFailCh,
+		stopPingCh, pingWg)
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGTERM, syscall.SIGINT)
 
-	sig := <-c
-	fmt.Printf("Received signal [%v]; shutting down...\n", sig)
-	mode.StopSession()
+	select {
+	case sig := <-c:
+		fmt.Printf("Received signal [%v]; shutting down...\n", sig)
+	case <-pingFailCh:
+		fmt.Printf("Ping failed. shutting down...\n")
+	}
+	close(stopPingCh)
+	pingWg.Wait()
+	client.Disconnect()
 }

@@ -1,4 +1,4 @@
-package mode
+package client_api
 
 import (
 	"crypto/tls"
