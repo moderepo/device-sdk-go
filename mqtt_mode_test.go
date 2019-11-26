@@ -1,20 +1,21 @@
-package mode_client
+package mode
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
 
 var (
 	// My cloudmqtt.com server)
-	modeMqttHost = "staging-api.corp.tinkermode.com"
-	modeMqttPort = 8883
-	modeUseTLS   = true
+	modeMqttHost = "localhost"
+	modeMqttPort = 1998
+	modeUseTLS   = false
 )
 
-func invalidModeMqttDelegate() (ModeMqttDelegate, chan *DeviceCommand,
+func invalidModeMqttDelegate() (*ModeMqttDelegate, chan *DeviceCommand,
 	chan *KeyValueSync) {
 	dc := &DeviceContext{
 		DeviceID:  1,
@@ -26,15 +27,11 @@ func invalidModeMqttDelegate() (ModeMqttDelegate, chan *DeviceCommand,
 	return NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue), cmdQueue, kvSyncQueue
 }
 
-func newModeMqttDelegate() (ModeMqttDelegate, chan *DeviceCommand,
+func newModeMqttDelegate() (*ModeMqttDelegate, chan *DeviceCommand,
 	chan *KeyValueSync) {
-	// dc := &DeviceContext{
-	// 	DeviceID: 3,
-	// 	AuthToken: "v1.ZHwz.1572890582.f5ec7d70fee941706d86524cb6ac7f0520d1d15d0bcf317e0b540976c7dcaea11eb3c7145d066fee370ed3a9b9e98a0e0228f8e8114efea184bdbedc2fbfdb318c61582e3eb57b2b",
-	// }
 	dc := &DeviceContext{
-		DeviceID:  6039,
-		AuthToken: "v1.ZHw2MDM5.1569621661.671be6c80a78df0a620c8371061fc3bb71a09be3d1297157d707142adfa36f0a26d77a751652f9693e2fdc081301367ea746ca8120aa4945908ff6d5feeba7a2341c0e5e25d04952",
+		DeviceID:  1234,
+		AuthToken: "v1.XXXXXXXXX",
 	}
 
 	cmdQueue := make(chan *DeviceCommand, 1)
@@ -68,7 +65,7 @@ func testModeConnection(t *testing.T, delegate MqttDelegate,
 }
 
 // Helper for some tests
-func testModeWaitForPubAck(t *testing.T, delegate ModeMqttDelegate,
+func testModeWaitForPubAck(t *testing.T, delegate *ModeMqttDelegate,
 	expectTimeout bool) uint16 {
 	// Wait for the ack, or timeout
 	ctx, cancel := context.WithTimeout(context.Background(),
@@ -95,20 +92,32 @@ func testModeWaitForPubAck(t *testing.T, delegate ModeMqttDelegate,
 }
 
 func TestModeMqttClientConnection(t *testing.T) {
-	fmt.Println("TestModeMqttClientConnction: test bad user/pass")
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
+
+	fmt.Println("TestModeMqttClientConnection: test bad user/pass")
 	badDelegate, _, _ := invalidModeMqttDelegate()
 	testModeConnection(t, badDelegate, true)
 
-	fmt.Println("TestModeMqttClientConnction: test good user/pass")
+	fmt.Println("TestModeMqttClientConnection: test good user/pass")
 	goodDelegate, _, _ := newModeMqttDelegate()
 	client := testModeConnection(t, goodDelegate, false)
 
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	cancel()
+	wg.Wait()
 }
 
 func TestModeMqttClientSubscribe(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
+
 	fmt.Println("TestModeMqttClientSubscribe")
 	goodDelegate, _, _ := newModeMqttDelegate()
 	client := testModeConnection(t, goodDelegate, false)
@@ -119,9 +128,16 @@ func TestModeMqttClientSubscribe(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	cancel()
+	wg.Wait()
 }
 
 func TestModeMqttClientPing(t *testing.T) {
+	var wg sync.WaitGroup
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(serverCtx, &wg, publishNone)
+
 	fmt.Println("TestMqttClientPing")
 	goodDelegate, _, _ := newModeMqttDelegate()
 	client := testModeConnection(t, goodDelegate, false)
@@ -153,9 +169,16 @@ func TestModeMqttClientPing(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	serverCancel()
+	wg.Wait()
 }
 
 func TestModeMqttClientPublishEvent(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
+
 	fmt.Println("TestMqttClientPublishEvent")
 	goodDelegate, _, _ := newModeMqttDelegate()
 	client := testModeConnection(t, goodDelegate, false)
@@ -197,11 +220,18 @@ func TestModeMqttClientPublishEvent(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	cancel()
+	wg.Wait()
 }
 
 // Only test QOS 1 for this (QOS 0 was tested in PublishEvent, so, unless we
 // hit a bug with BulkData publishing, I think that's sufficient.
 func TestModeMqttClientPublishBulkData(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
+
 	fmt.Println("TestMqttClientPublishBulkData")
 	goodDelegate, _, _ := newModeMqttDelegate()
 	client := testModeConnection(t, goodDelegate, false)
@@ -224,9 +254,16 @@ func TestModeMqttClientPublishBulkData(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	cancel()
+	wg.Wait()
 }
 
 func TestModeMqttClientPublishKVUpdate(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
+
 	fmt.Println("TestMqttClientPublishKVUpdate")
 	goodDelegate, _, _ := newModeMqttDelegate()
 	client := testModeConnection(t, goodDelegate, false)
@@ -247,7 +284,6 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	}
 
 	returnId := testModeWaitForPubAck(t, goodDelegate, false)
-
 	if packetId != returnId {
 		t.Errorf("Send packet %d did not match Ack packet %d\n",
 			packetId, returnId)
@@ -256,11 +292,16 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	// Reload the value
 	kvData.Action = KVSyncActionReload
 
-	_, err = client.PublishKeyValueUpdate(kvData)
+	packetId, err = client.PublishKeyValueUpdate(kvData)
 	if err != nil {
 		t.Errorf("PublishKeyValueUpdate send failed: %s", err)
 	}
-	// No ACK for this one
+	returnId = testModeWaitForPubAck(t, goodDelegate, true)
+
+	if packetId != returnId {
+		t.Errorf("Send packet %d did not match Ack packet %d\n",
+			packetId, returnId)
+	}
 
 	// Delete the value
 	kvData.Action = KVSyncActionDelete
@@ -272,20 +313,26 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 
 	returnId = testModeWaitForPubAck(t, goodDelegate, true)
 
-	// Seems like we don't get an ack for deletes
-	// if packetId != returnId {
-	// 	t.Errorf("Send packet %d did not match Ack packet %d\n",
-	// 		packetId, returnId)
-	// }
+	if packetId != returnId {
+		t.Errorf("Send packet %d did not match Ack packet %d\n",
+			packetId, returnId)
+	}
 
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	cancel()
+	wg.Wait()
 }
 
 // When we first connect and subscribe to the kv topic, we'll get a sync.
 // This is a good test to see that we're receiving.
 func TestModeMqttClientReceiveKvSync(t *testing.T) {
+	var wg sync.WaitGroup
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(serverCtx, &wg, publishKvUpdate)
+
 	fmt.Println("TestModeMqttClientReceiveKvSync")
 	goodDelegate, _, kvSyncChannel := newModeMqttDelegate()
 	client := NewMqttClient(modeMqttHost, modeMqttPort, nil, modeUseTLS,
@@ -313,6 +360,7 @@ func TestModeMqttClientReceiveKvSync(t *testing.T) {
 	select {
 	case kvSync := <-kvSyncChannel:
 		fmt.Printf("Received the sync from the server: %s\n", kvSync.Action)
+		fmt.Printf("Data: %v\n", kvSync)
 		receivedSubData = true
 		break
 	case <-ctx.Done():
@@ -326,11 +374,18 @@ func TestModeMqttClientReceiveKvSync(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	serverCancel()
+	wg.Wait()
 }
 
 // We need to wait for someone to send this to us, so I'm not sure how to
 // initiate this automatically
-func NoTestModeMqttClientReceiveCommand(t *testing.T) {
+func TestModeMqttClientReceiveCommand(t *testing.T) {
+	var wg sync.WaitGroup
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(serverCtx, &wg, publishCommand)
+
 	fmt.Println("TestModeMqttClientReceiveCommand")
 	goodDelegate, cmdChannel, _ := newModeMqttDelegate()
 	client := NewMqttClient(modeMqttHost, modeMqttPort, nil, modeUseTLS,
@@ -365,10 +420,12 @@ func NoTestModeMqttClientReceiveCommand(t *testing.T) {
 	}
 
 	if !receivedSubData {
-		t.Errorf("Did not receive KV Sync")
+		t.Errorf("Did not receive command")
 	}
 	fmt.Println("Exiting")
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	serverCancel()
+	wg.Wait()
 }

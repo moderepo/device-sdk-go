@@ -17,17 +17,16 @@ import (
 )
 
 var (
-	// My cloudmqtt.com server)
 	modeMqttHost = "staging-api.corp.tinkermode.com"
 	modeMqttPort = 8883
 	modeUseTLS   = true
 )
 
-func pingLoop(client *mode_client.MqttClient, timeout time.Duration,
+// XXX - Go back and sync this code up with the regular echo when the code stabilizes
+func pingLoop(client *mode.MqttClient, timeout time.Duration,
 	pingRecv <-chan bool, gotDisconnected chan<- bool, doDisconnect <-chan bool,
 	wg sync.WaitGroup) {
 
-	wg.Add(1)
 	defer func() {
 		fmt.Println("Exiting ping loop")
 		wg.Done()
@@ -68,7 +67,7 @@ func pingLoop(client *mode_client.MqttClient, timeout time.Duration,
 	}
 }
 
-func waitForAck(delegate *mode_client.ModeMqttDelegate) uint16 {
+func waitForAck(delegate *mode.ModeMqttDelegate) uint16 {
 	// Wait for the ack, or timeout
 	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Second)
@@ -89,8 +88,8 @@ func waitForAck(delegate *mode_client.ModeMqttDelegate) uint16 {
 	return 0
 }
 
-func receiveCommands(cmdChannel chan *mode_client.DeviceCommand,
-	delegate *mode_client.ModeMqttDelegate, client *mode_client.MqttClient) {
+func receiveCommands(cmdChannel chan *mode.DeviceCommand,
+	delegate *mode.ModeMqttDelegate, client *mode.MqttClient) {
 
 	for cmd := range cmdChannel {
 		switch cmd.Action {
@@ -104,10 +103,10 @@ func receiveCommands(cmdChannel chan *mode_client.DeviceCommand,
 				return
 			}
 
-			event := mode_client.DeviceEvent{
+			event := mode.DeviceEvent{
 				EventType: "echo",
 				EventData: map[string]interface{}{"msg": params.Msg},
-				Qos:       mode_client.QOSAtLeastOnce,
+				Qos:       mode.QOSAtLeastOnce,
 			}
 
 			_, err := client.PublishEvent(event)
@@ -123,20 +122,20 @@ func receiveCommands(cmdChannel chan *mode_client.DeviceCommand,
 func main() {
 	var pingWg sync.WaitGroup
 
-	dc := &mode_client.DeviceContext{
-		DeviceID:      6040,
-		AuthToken:     "v1.ZHw2MDQw.1569621662.113e3dd1c0d5024816a41c0264fa0a734dfe31db218da0a480ceceee9961123348dc1aaf563480108b6f438c0710bbe244972f979e2ee08164a5d9c4c8a306d0633a96bff4edaec9",
+	dc := &mode.DeviceContext{
+		DeviceID:  0000,
+		AuthToken: "v1.XXXXXXXX"
 		TLSClientAuth: true,
 	}
 	// Set client certificate when you set TLSClientAuth to true.
 	// change this to real file name and password
 	dc.SetPKCS12ClientCertificate("fixtures/client1.p12", "pwd", true)
 
-	cmdQueue := make(chan *mode_client.DeviceCommand, 16)
-	kvSyncQueue := make(chan *mode_client.KeyValueSync, 16)
-	delegate := mode_client.NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue)
+	cmdQueue := make(chan *mode.DeviceCommand, 16)
+	kvSyncQueue := make(chan *mode.KeyValueSync, 16)
+	delegate := mode.NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue)
 
-	client := mode_client.NewMqttClient(modeMqttHost, modeMqttPort, nil,
+	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, nil,
 		modeUseTLS, delegate)
 	if err := client.Connect(); err != nil {
 		fmt.Printf("Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
@@ -155,6 +154,7 @@ func main() {
 	pingFailCh := make(chan bool)
 
 	// Run the ping loop to keep alive while we wait for the "doEcho" command
+	pingWg.Add(1)
 	go pingLoop(client, 5*time.Second, delegate.PingAckCh, pingFailCh,
 		stopPingCh, pingWg)
 

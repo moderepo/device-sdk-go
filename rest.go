@@ -1,4 +1,4 @@
-package mode_client
+package mode
 
 import (
 	"bytes"

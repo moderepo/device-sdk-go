@@ -1,19 +1,12 @@
-package mode_client
+package mode
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
-)
-
-var (
-	// My cloudmqtt.com server)
-	testMqttHost   = "tailor.cloudmqtt.com"
-	testMqttPort   = 28371
-	useTLS         = true
-	requestTimeout = 2 * time.Second
 )
 
 type TestMqttDelegate struct {
@@ -25,13 +18,13 @@ type TestMqttDelegate struct {
 	pingAckCh     chan bool
 }
 
-func newTestMqttDelegate() TestMqttDelegate {
-	return TestMqttDelegate{
+func newTestMqttDelegate() *TestMqttDelegate {
+	return &TestMqttDelegate{
 		// This is a user level password, which I can change, but it still
 		// shouldn't be in here. But, how else do you do automated tests in a
 		// public server?
-		username:   "wcuyfgii",
-		password:   "PrQge1s_AVVb",
+		username:   "good",
+		password:   "anything",
 		subRecvCh:  make(chan MqttSubData),
 		queueAckCh: make(chan MqttQueueResult),
 		pingAckCh:  make(chan bool),
@@ -77,12 +70,15 @@ func (del TestMqttDelegate) Close() {
 
 func testConnection(t *testing.T, delegate MqttDelegate,
 	expectError bool) *MqttClient {
+
 	client := NewMqttClient(testMqttHost, testMqttPort, nil, useTLS,
 		delegate)
 	err := client.Connect()
 	if expectError {
 		if err == nil {
 			t.Errorf("Did not receive expected error")
+		} else {
+			fmt.Printf("Received expected error: %s\n", err)
 		}
 	} else if err != nil {
 		t.Errorf("Connect failed: %s", err)
@@ -100,20 +96,32 @@ func testConnection(t *testing.T, delegate MqttDelegate,
 }
 
 func TestMqttClientConnection(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
 	fmt.Println("TestMqttClientConnction: test bad user/pass")
 	badDelegate := invalidTestMqttDelegate()
+	fmt.Println("Hitting server")
 	testConnection(t, badDelegate, true)
 
 	fmt.Println("TestMqttClientConnction: test good user/pass")
 	goodDelegate := newTestMqttDelegate()
-	client := testConnection(t, goodDelegate, false)
+	//client := testConnection(t, goodDelegate, false)
+	testConnection(t, goodDelegate, false)
+	// if client.Disconnect() != nil {
+	// 	t.Errorf("error disconnecting")
+	// }
 
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
+	cancel()
+	wg.Wait()
 }
 
 func TestMqttClientSubscribe(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
 	fmt.Println("TestMqttClientSubscribe")
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(t, goodDelegate, false)
@@ -124,9 +132,15 @@ func TestMqttClientSubscribe(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	cancel()
+	wg.Wait()
 }
 
 func TestMqttClientPublish(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, publishNone)
 	fmt.Println("TestMqttClientPublish")
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(t, goodDelegate, false)
@@ -159,10 +173,17 @@ func TestMqttClientPublish(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	cancel()
+	wg.Wait()
 }
 
 func TestMqttClientPing(t *testing.T) {
 	fmt.Println("TestMqttClientPing")
+	var wg sync.WaitGroup
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(serverCtx, &wg, publishNone)
+
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(t, goodDelegate, false)
 
@@ -190,4 +211,6 @@ func TestMqttClientPing(t *testing.T) {
 	if client.Disconnect() != nil {
 		t.Errorf("error disconnecting")
 	}
+	serverCancel()
+	wg.Wait()
 }

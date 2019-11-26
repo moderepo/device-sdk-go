@@ -1,7 +1,7 @@
 // MQTT Client the Mode MQTT API
 // The interface is through the MQTTClient struct, which supports the MQTT
 // subset that is required for our devices.
-package mode_client
+package mode
 
 import (
 	"context"
@@ -36,12 +36,6 @@ const (
 
 	// QoS 2 - message is always delivered exactly once. This is currently not supported.
 	QOSExactlyOnce
-)
-
-const (
-	KVSyncActionReload = "reload"
-	KVSyncActionSet    = "set"
-	KVSyncActionDelete = "delete"
 )
 
 type (
@@ -165,7 +159,9 @@ func NewMqttClient(mqttHost string, mqttPort int, tlsConfig *tls.Config,
 
 	// We want to pass our WaitGroup's to the connection reader and writer, so
 	// we don't put these in the mqttConn's constructor.
+	client.wgSend.Add(1)
 	go conn.runPacketWriter(&client.wgSend)
+	client.wgRecv.Add(1)
 	go conn.runPacketReader(&client.wgRecv)
 
 	// Connect and Subscribe here. These are exposed for now, but we might
@@ -195,6 +191,7 @@ func (client *MqttClient) Connect() error {
 	}
 
 	var pkt packet.Packet
+	client.wgRecv.Add(1)
 	if pkt, err = client.receivePacket(respChan); err != nil {
 		logError("[MQTT] failed to receive packet %s", err)
 		return err
@@ -264,6 +261,7 @@ func (client *MqttClient) Subscribe() error {
 	}
 
 	var pkt packet.Packet
+	client.wgRecv.Add(1)
 	if pkt, err = client.receivePacket(respChan); err != nil {
 		return err
 	}
@@ -334,7 +332,6 @@ func (client *MqttClient) Publish(qos QOSLevel, topic string,
 
 func (client *MqttClient) receivePacket(respChan mqttPacketChan) (packet.Packet,
 	error) {
-	client.wgRecv.Add(1)
 	defer client.wgRecv.Done()
 
 	ctx, cancel := context.WithTimeout(context.Background(),
@@ -463,7 +460,6 @@ func (conn *mqttConn) SendPacket(p packet.Packet) (mqttPacketChan, error) {
 }
 
 func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup) {
-	wg.Add(1)
 	defer func() {
 		logInfo("[MQTT] packet writer is exiting")
 		wg.Done()
@@ -494,8 +490,6 @@ func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup) {
 }
 
 func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
-	wg.Add(1)
-
 	defer func() {
 		logInfo("[MQTT] packet reader is exiting")
 		wg.Done()
@@ -518,7 +512,6 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 				logError("[MQTT] failed to read packet: %s", err.Error())
 				//conn.reportError(err)
 			}
-			return
 			break
 		}
 		if p.Type() == packet.PUBLISH {

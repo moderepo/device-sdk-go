@@ -1,5 +1,5 @@
 // Source for the MODE specific MQTT protocol.
-package mode_client
+package mode
 
 import (
 	"bytes"
@@ -8,6 +8,12 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+)
+
+const (
+	KVSyncActionReload = "reload"
+	KVSyncActionSet    = "set"
+	KVSyncActionDelete = "delete"
 )
 
 type (
@@ -70,8 +76,8 @@ type (
 
 // Maybe have the channel sizes as parameters.
 func NewModeMqttDelegate(dc *DeviceContext, cmdQueue chan<- *DeviceCommand,
-	kvSyncQueue chan<- *KeyValueSync) ModeMqttDelegate {
-	del := ModeMqttDelegate{
+	kvSyncQueue chan<- *KeyValueSync) *ModeMqttDelegate {
+	del := &ModeMqttDelegate{
 		dc:             dc,
 		requestTimeout: 4 * time.Second,
 		command:        cmdQueue,
@@ -135,7 +141,6 @@ func (del ModeMqttDelegate) Subscriptions() []string {
 }
 
 func (del ModeMqttDelegate) Close() {
-	fmt.Println("Closing client channels")
 	close(del.command)
 	close(del.kvSync)
 }
@@ -178,8 +183,8 @@ func (del ModeMqttDelegate) handleKeyValueMsg(data []byte) error {
 
 // Mode extensions to the MqttClient
 // cast to the concrete delegate
-func (client *MqttClient) getModeDelegate() (ModeMqttDelegate, error) {
-	implDelegate, ok := client.delegate.(ModeMqttDelegate)
+func (client *MqttClient) getModeDelegate() (*ModeMqttDelegate, error) {
+	implDelegate, ok := client.delegate.(*ModeMqttDelegate)
 	if !ok {
 		return implDelegate, fmt.Errorf("MqttClient was not created with Mode Delegate")
 	} else {

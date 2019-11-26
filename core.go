@@ -1,15 +1,10 @@
 /*
 This package provides a Go API for devices to interact with the MODE cloud.
 
-If a device wants to receive commands from and send events to the MODE cloud,
-it must start a connection session. Connection session is also required for the
-device to use the Device Data Proxy (device key-value store) feature.
+TBD
 
-Both incoming commands and outgoing events are queued. If the connection is
-disrupted, commands already in the queue will be processed. Likewise,
-events already in the queue will be delivered when the connection resumes.
 */
-package mode_client
+package mode
 
 import (
 	"crypto/tls"
@@ -24,7 +19,7 @@ import (
 )
 
 const (
-	sdkVersion      = "1.0"
+	sdkVersion      = "3.0"
 	defaultRESTHost = "api.tinkermode.com"
 )
 
@@ -63,13 +58,6 @@ type (
 		Name        string `json:"name"`
 		Tag         string `json:"tag"`
 		DeviceClass string `json:"deviceClass"`
-	}
-
-	// BulkData represents a batch of opaque data to be sent to the MODE cloud.
-	DeviceSyncedBulkData struct {
-		StreamID string
-		Blob     []byte
-		response chan error // not exported to serializer
 	}
 )
 

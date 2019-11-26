@@ -13,21 +13,20 @@ import (
 	"syscall"
 	"time"
 
+	// XXX This will be v3 in release.
 	"github.com/moderepo/device-sdk-go/v2"
 )
 
 var (
-	// My cloudmqtt.com server)
-	modeMqttHost = "staging-api.corp.tinkermode.com"
-	modeMqttPort = 8883
-	modeUseTLS   = true
+	// Set these to the mode server (or start the mqtt_dummy)
+	modeMqttHost = "localhost"
+	modeMqttPort = 1998
+	modeUseTLS   = false
 )
 
-func pingLoop(client *mode_client.MqttClient, timeout time.Duration,
-	pingRecv <-chan bool, gotDisconnected chan<- bool, doDisconnect <-chan bool,
-	wg sync.WaitGroup) {
+func pingLoop(ctx context.Context, client *mode.MqttClient,
+	timeout time.Duration, pingRecv <-chan bool, wg *sync.WaitGroup) {
 
-	wg.Add(1)
 	defer func() {
 		fmt.Println("Exiting ping loop")
 		wg.Done()
@@ -36,30 +35,37 @@ func pingLoop(client *mode_client.MqttClient, timeout time.Duration,
 
 	for {
 		if err := client.Ping(); err != nil {
-			gotDisconnected <- true
 			return
 		}
 
-		// Wait for the ack, or timeout
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		// New context for timing out
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
 		// Block on the return channel or timeout
 		select {
-		case <-doDisconnect:
-			fmt.Println("runner told me to exit")
-			return
 		case ret := <-pingRecv:
 			// There's not really a way to return false, but, since it's bool,
 			// we'll check
 			fmt.Println("Got ping response")
 			if !ret {
 				fmt.Println("sender closed ping channel")
-				gotDisconnected <- true
+				return
 			}
 		case <-ctx.Done():
-			fmt.Println("ping timeout")
-			gotDisconnected <- true
+			// If we were cancelled, wait for the ping response before quitting
+			switch ctx.Err() {
+			case context.Canceled:
+				// We don't want the ping response to get written on an empty
+				// channel, so wait for it. In a real world example, we would
+				// continue the loop or create a new context, but it's a rare
+				// case that we're cancelling *and* the ping response gets
+				// lost.
+				<-pingRecv
+			case context.DeadlineExceeded:
+				// timeout, so we're not going to wait for the response anymore
+			}
+			return
 		}
 
 		fmt.Println("Ping sent and ack'ed")
@@ -68,7 +74,7 @@ func pingLoop(client *mode_client.MqttClient, timeout time.Duration,
 	}
 }
 
-func waitForAck(delegate *mode_client.ModeMqttDelegate) uint16 {
+func waitForAck(delegate *mode.ModeMqttDelegate) uint16 {
 	// Wait for the ack, or timeout
 	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Second)
@@ -89,8 +95,8 @@ func waitForAck(delegate *mode_client.ModeMqttDelegate) uint16 {
 	return 0
 }
 
-func receiveCommands(cmdChannel chan *mode_client.DeviceCommand,
-	delegate *mode_client.ModeMqttDelegate, client *mode_client.MqttClient) {
+func receiveCommands(cmdChannel chan *mode.DeviceCommand,
+	delegate *mode.ModeMqttDelegate, client *mode.MqttClient) {
 
 	for cmd := range cmdChannel {
 		switch cmd.Action {
@@ -104,10 +110,10 @@ func receiveCommands(cmdChannel chan *mode_client.DeviceCommand,
 				return
 			}
 
-			event := mode_client.DeviceEvent{
+			event := mode.DeviceEvent{
 				EventType: "echo",
 				EventData: map[string]interface{}{"msg": params.Msg},
-				Qos:       mode_client.QOSAtLeastOnce,
+				Qos:       mode.QOSAtLeastOnce,
 			}
 
 			_, err := client.PublishEvent(event)
@@ -123,16 +129,16 @@ func receiveCommands(cmdChannel chan *mode_client.DeviceCommand,
 func main() {
 	var pingWg sync.WaitGroup
 
-	dc := &mode_client.DeviceContext{
-		DeviceID:  6040,
-		AuthToken: "v1.ZHw2MDQw.1569621662.113e3dd1c0d5024816a41c0264fa0a734dfe31db218da0a480ceceee9961123348dc1aaf563480108b6f438c0710bbe244972f979e2ee08164a5d9c4c8a306d0633a96bff4edaec9",
+	dc := &mode.DeviceContext{
+		DeviceID:  1234,
+		AuthToken: "v1.XXXXXXXX",
 	}
 
-	cmdQueue := make(chan *mode_client.DeviceCommand, 16)
-	kvSyncQueue := make(chan *mode_client.KeyValueSync, 16)
-	delegate := mode_client.NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue)
+	cmdQueue := make(chan *mode.DeviceCommand, 16)
+	kvSyncQueue := make(chan *mode.KeyValueSync, 16)
+	delegate := mode.NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue)
 
-	client := mode_client.NewMqttClient(modeMqttHost, modeMqttPort, nil,
+	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, nil,
 		modeUseTLS, delegate)
 	if err := client.Connect(); err != nil {
 		fmt.Printf("Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
@@ -147,23 +153,19 @@ func main() {
 		fmt.Printf("failed to subscribe: %s\n", err)
 	}
 
-	stopPingCh := make(chan bool)
-	pingFailCh := make(chan bool)
+	pingCtx, pingCancel := context.WithCancel(context.Background())
 
 	// Run the ping loop to keep alive while we wait for the "doEcho" command
-	go pingLoop(client, 5*time.Second, delegate.PingAckCh, pingFailCh,
-		stopPingCh, pingWg)
+	pingWg.Add(1)
+	go pingLoop(pingCtx, client, 5*time.Second, delegate.PingAckCh, &pingWg)
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGTERM, syscall.SIGINT)
 
-	select {
-	case sig := <-c:
-		fmt.Printf("Received signal [%v]; shutting down...\n", sig)
-	case <-pingFailCh:
-		fmt.Printf("Ping failed. shutting down...\n")
-	}
-	close(stopPingCh)
+	sig := <-c
+
+	fmt.Printf("Received signal [%v]; shutting down...\n", sig)
+	pingCancel()
 	pingWg.Wait()
 	client.Disconnect()
 }
