@@ -73,6 +73,8 @@ var (
 	keyValueSyncQueueLength     = 128
 	keyValuePushQueueLength     = 128
 	keyValueCallbackQueueLength = 128
+	bulkDataRequestQueueLength  = 128
+	bulkDataResponseQueueLength = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies
@@ -195,6 +197,25 @@ type (
 	// A callback function that is invoked when a key-value pair has been deleted.
 	// The key of the deleted key-value is passed in the argument.
 	KeyValueDeletedCallback func(*DeviceContext, string)
+
+	// DeviceBulkDataRequest is request struct of "request/response" for bulkData.
+	DeviceBulkDataRequest struct {
+		StreamID  string                 `json:"-"`
+		RequestID string                 `json:"requestId"`
+		Payload   map[string]interface{} `json:"payload"`
+		qos       QOSLevel               // not exported to serializer
+	}
+
+	// DeviceBulkDataResponse is response struct of "request/response" for bulkData.
+	DeviceBulkDataResponse struct {
+		StreamID  string                 `json:"-"`
+		RequestID string                 `json:"requestId"`
+		Status    string                 `json:"status"`
+		Payload   map[string]interface{} `json:"payload,omitempty"`
+	}
+
+	// BulkDataResponseReceiver receive a response of a bulk data request from Stream.
+	BulkDataResponseReceiver func(*DeviceContext, *DeviceBulkDataResponse)
 )
 
 // ProvisionDevice is used for on-demand device provisioning. It takes a

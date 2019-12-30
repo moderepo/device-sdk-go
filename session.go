@@ -14,13 +14,15 @@ type (
 	}
 
 	session struct {
-		dc               *DeviceContext
-		conn             connection
-		cmdQueue         chan *DeviceCommand
-		evtQueue         chan *DeviceEvent
-		bulkDataQueue    chan *DeviceBulkData
-		syncedBulkDataCh chan *DeviceSyncedBulkData
-		kvCache          *keyValueCache
+		dc                    *DeviceContext
+		conn                  connection
+		cmdQueue              chan *DeviceCommand
+		evtQueue              chan *DeviceEvent
+		bulkDataQueue         chan *DeviceBulkData
+		syncedBulkDataCh      chan *DeviceSyncedBulkData
+		bulkDataRequestQueue  chan *DeviceBulkDataRequest
+		bulkDataResponseQueue chan *DeviceBulkDataResponse
+		kvCache               *keyValueCache
 	}
 
 	sessCtrlStart struct {
@@ -48,6 +50,16 @@ type (
 
 	sessCtrlWriteBulkData struct {
 		event    *DeviceSyncedBulkData
+		response chan error
+	}
+
+	sessCtrlSendBulkDataRequest struct {
+		request  *DeviceBulkDataRequest
+		response chan error
+	}
+
+	sessCtrlSendBulkDataResponse struct {
+		request  *DeviceBulkDataResponse
 		response chan error
 	}
 
@@ -98,14 +110,15 @@ var (
 	sessState = SessionIdle
 
 	sessCtrl struct {
-		start         chan *sessCtrlStart
-		stop          chan *sessCtrlStop
-		getState      chan *sessCtrlGetState
-		sendEvent     chan *sessCtrlSendEvent
-		sendBulkData  chan *sessCtrlSendBulkData
-		writeBulkData chan *sessCtrlWriteBulkData
-		accessKV      chan *sessCtrlAccessKV
-		ping          <-chan time.Time
+		start               chan *sessCtrlStart
+		stop                chan *sessCtrlStop
+		getState            chan *sessCtrlGetState
+		sendEvent           chan *sessCtrlSendEvent
+		sendBulkData        chan *sessCtrlSendBulkData
+		writeBulkData       chan *sessCtrlWriteBulkData
+		accessKV            chan *sessCtrlAccessKV
+		sendBulkDataRequest chan *sessCtrlSendBulkDataRequest
+		ping                <-chan time.Time
 	}
 
 	sess *session
@@ -118,6 +131,8 @@ var (
 	keyValuesReadyCallback  KeyValuesReadyCallback
 	keyValueStoredCallback  KeyValueStoredCallback
 	keyValueDeletedCallback KeyValueDeletedCallback
+
+	bulkDataResponseReceivers = map[string]BulkDataResponseReceiver{}
 
 	sessPingInterval = sessDefaultPingInterval
 	sessPingTimeout  = sessDefaultPingTimeout
@@ -136,6 +151,7 @@ func init() {
 	sessCtrl.sendEvent = make(chan *sessCtrlSendEvent, 1)
 	sessCtrl.sendBulkData = make(chan *sessCtrlSendBulkData, 1)
 	sessCtrl.writeBulkData = make(chan *sessCtrlWriteBulkData, 1)
+	sessCtrl.sendBulkDataRequest = make(chan *sessCtrlSendBulkDataRequest, 1)
 	sessCtrl.accessKV = make(chan *sessCtrlAccessKV, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
@@ -199,6 +215,11 @@ func SetKeyValueDeletedCallback(f KeyValueDeletedCallback) {
 	keyValueDeletedCallback = f
 }
 
+// SetBulkDataResponseReceiver register a callback function when it received request from a DataStream.
+func SetBulkDataResponseReceiver(streamID string, receiver BulkDataResponseReceiver) {
+	bulkDataResponseReceivers[strings.ToLower(streamID)] = receiver
+}
+
 // When the device's connection session is in the "active" state, "pings"
 // are periodically sent to the server. A ping fails if the server doesn't
 // respond. ConfigurePings overrides the default time interval between pings and
@@ -210,19 +231,22 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 
 func initSession(dc *DeviceContext) error {
 	sess = &session{
-		dc:               dc,
-		cmdQueue:         make(chan *DeviceCommand, commandQueueLength),
-		evtQueue:         make(chan *DeviceEvent, eventQueueLength),
-		bulkDataQueue:    make(chan *DeviceBulkData, bulkDataQueueLength),
-		syncedBulkDataCh: make(chan *DeviceSyncedBulkData, 1),
-		kvCache:          newKeyValueCache(dc),
+		dc:                    dc,
+		cmdQueue:              make(chan *DeviceCommand, commandQueueLength),
+		evtQueue:              make(chan *DeviceEvent, eventQueueLength),
+		bulkDataQueue:         make(chan *DeviceBulkData, bulkDataQueueLength),
+		syncedBulkDataCh:      make(chan *DeviceSyncedBulkData, 1),
+		bulkDataRequestQueue:  make(chan *DeviceBulkDataRequest, bulkDataRequestQueueLength),
+		bulkDataResponseQueue: make(chan *DeviceBulkDataResponse, bulkDataResponseQueueLength),
+		kvCache:               newKeyValueCache(dc),
 	}
 
 	sess.startCommandProcessor()
+	sess.startBulkDataResponseProcessor()
 	go sess.kvCache.run()
 
 	logInfo("[Session] opening MQTT connection...")
-	conn, err := dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.bulkDataQueue, sess.syncedBulkDataCh, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
+	conn, err := dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.bulkDataQueue, sess.syncedBulkDataCh, sess.bulkDataRequestQueue, sess.bulkDataResponseQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -276,7 +300,7 @@ func (s *session) reconnect() error {
 	}
 
 	logInfo("[Session] opening MQTT connection...")
-	conn, err := s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.bulkDataQueue, s.syncedBulkDataCh, s.kvCache.syncQueue, s.kvCache.pushQueue)
+	conn, err := s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.bulkDataQueue, s.syncedBulkDataCh, s.bulkDataRequestQueue, s.bulkDataResponseQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -297,6 +321,19 @@ func (s *session) startCommandProcessor() {
 				h(s.dc, cmd)
 			} else if defaultCommandHandler != nil {
 				defaultCommandHandler(s.dc, cmd)
+			}
+		}
+	}()
+}
+
+func (s *session) startBulkDataResponseProcessor() {
+	go func() {
+		logInfo("[Session] BulkData Response processor is running")
+		defer logInfo("[Session] BulkData Response processor is exiting")
+
+		for response := range s.bulkDataResponseQueue {
+			if receiver, ok := bulkDataResponseReceivers[strings.ToLower(response.StreamID)]; ok {
+				receiver(s.dc, response)
 			}
 		}
 	}()
@@ -375,6 +412,9 @@ func sessionIdleLoop() {
 
 		case c := <-sessCtrl.writeBulkData:
 			c.response <- ErrorSessionNotStarted
+
+		case c := <-sessCtrl.sendBulkDataRequest:
+			c.response <- ErrorSessionNotStarted
 		}
 	}
 }
@@ -413,6 +453,10 @@ func sessionActiveLoop() {
 
 		case c := <-sessCtrl.writeBulkData:
 			sess.syncedBulkDataCh <- c.event
+
+		case c := <-sessCtrl.sendBulkDataRequest:
+			sess.bulkDataRequestQueue <- c.request
+			c.response <- nil
 
 		case c := <-sessCtrl.accessKV:
 			handleKVAccess(c, false)
@@ -471,6 +515,9 @@ func sessionRecoveringLoop() {
 			c.response <- ErrorSessionRecovering
 
 		case c := <-sessCtrl.writeBulkData:
+			c.response <- ErrorSessionRecovering
+
+		case c := <-sessCtrl.sendBulkDataRequest:
 			c.response <- ErrorSessionRecovering
 
 		case c := <-sessCtrl.accessKV:
@@ -574,6 +621,18 @@ func WriteBulkData(streamID string, blob []byte) error {
 	sessCtrl.writeBulkData <- ctrl
 	err := <-ctrl.response
 	return err
+}
+
+// SendBulkDataRequest queues up a device bulkDataEvent to be delivered to the MODE cloud.
+// It returns an error if the device connection session is in idle or recovery state.
+func SendBulkDataRequest(streamID string, requestID string, payload map[string]interface{}, qos QOSLevel) error {
+	ctrl := &sessCtrlSendBulkDataRequest{
+		request:  &DeviceBulkDataRequest{StreamID: streamID, RequestID: requestID, Payload: payload, qos: qos},
+		response: make(chan error, 1),
+	}
+
+	sessCtrl.sendBulkDataRequest <- ctrl
+	return <-ctrl.response
 }
 
 // GetKeyValue looks up a key-value pair from the Device Data Proxy.

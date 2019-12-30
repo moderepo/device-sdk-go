@@ -169,3 +169,32 @@ func TestWriteBulkData(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestBulkDataRequest(t *testing.T) {
+	// Fake server to capture event
+	wg.Add(1)
+
+	var actual string
+	go dummyMQTTD(func(pub *packet.PublishPacket) bool {
+		actual = pub.Message.Topic
+		return true
+	})
+	SetMQTTHostPort("localhost", testPort, false)
+
+	dc := &DeviceContext{
+		DeviceID:  0,             // change this to real device ID
+		AuthToken: "XXXXXXXXXXX", // change this to real API key assigned to device
+	}
+
+	if err := StartSession(dc); err != nil {
+		t.Fatalf("Failed to start session: %v\n", err)
+		return
+	}
+
+	data := map[string]interface{}{"request": "open"}
+	err := SendBulkDataRequest("stream1", "requestId", data, QOSAtLeastOnce)
+	wg.Wait()
+	StopSession()
+	assert.Equal(t, actual, "/devices/0/bulkData/stream1/request")
+	assert.NoError(t, err)
+}
