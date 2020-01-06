@@ -540,7 +540,7 @@ func (mc *mqttConn) sendBulkDataRequest(b *DeviceBulkDataRequest) error {
 
 	mc.outPacket <- p
 
-	logInfo("[MQTT] bulkData request delivery for packet ID %d", p.PacketID)
+	logInfo("[MQTT] bulkData request delivery for packet ID %d and requestID %s", p.PacketID, b.RequestID)
 
 	if b.qos == QOSAtMostOnce {
 		return nil
