@@ -14,15 +14,16 @@ type (
 	}
 
 	session struct {
-		dc                    *DeviceContext
-		conn                  connection
-		cmdQueue              chan *DeviceCommand
-		evtQueue              chan *DeviceEvent
-		bulkDataQueue         chan *DeviceBulkData
-		syncedBulkDataCh      chan *DeviceSyncedBulkData
-		bulkDataRequestQueue  chan *DeviceBulkDataRequest
-		bulkDataResponseQueue chan *DeviceBulkDataResponse
-		kvCache               *keyValueCache
+		dc                             *DeviceContext
+		conn                           connection
+		cmdQueue                       chan *DeviceCommand
+		evtQueue                       chan *DeviceEvent
+		bulkDataQueue                  chan *DeviceBulkData
+		syncedBulkDataCh               chan *DeviceSyncedBulkData
+		bulkDataRequestQueue           chan *DeviceBulkDataRequest
+		bulkDataResponseQueue          chan *DeviceBulkDataResponse
+		subscribeBulkDataResponseQueue chan *DeviceSubscribeBulkDataResponse
+		kvCache                        *keyValueCache
 	}
 
 	sessCtrlStart struct {
@@ -56,6 +57,11 @@ type (
 	sessCtrlSendBulkDataRequest struct {
 		request  *DeviceBulkDataRequest
 		response chan error
+	}
+
+	sessCtrlSubscribeBulkDataResponse struct {
+		subscribe *DeviceSubscribeBulkDataResponse
+		response  chan error
 	}
 
 	sessCtrlSendBulkDataResponse struct {
@@ -110,15 +116,16 @@ var (
 	sessState = SessionIdle
 
 	sessCtrl struct {
-		start               chan *sessCtrlStart
-		stop                chan *sessCtrlStop
-		getState            chan *sessCtrlGetState
-		sendEvent           chan *sessCtrlSendEvent
-		sendBulkData        chan *sessCtrlSendBulkData
-		writeBulkData       chan *sessCtrlWriteBulkData
-		accessKV            chan *sessCtrlAccessKV
-		sendBulkDataRequest chan *sessCtrlSendBulkDataRequest
-		ping                <-chan time.Time
+		start                     chan *sessCtrlStart
+		stop                      chan *sessCtrlStop
+		getState                  chan *sessCtrlGetState
+		sendEvent                 chan *sessCtrlSendEvent
+		sendBulkData              chan *sessCtrlSendBulkData
+		writeBulkData             chan *sessCtrlWriteBulkData
+		accessKV                  chan *sessCtrlAccessKV
+		sendBulkDataRequest       chan *sessCtrlSendBulkDataRequest
+		subscribeBulkDataResponse chan *sessCtrlSubscribeBulkDataResponse
+		ping                      <-chan time.Time
 	}
 
 	sess *session
@@ -152,6 +159,7 @@ func init() {
 	sessCtrl.sendBulkData = make(chan *sessCtrlSendBulkData, 1)
 	sessCtrl.writeBulkData = make(chan *sessCtrlWriteBulkData, 1)
 	sessCtrl.sendBulkDataRequest = make(chan *sessCtrlSendBulkDataRequest, 1)
+	sessCtrl.subscribeBulkDataResponse = make(chan *sessCtrlSubscribeBulkDataResponse, 1)
 	sessCtrl.accessKV = make(chan *sessCtrlAccessKV, 1)
 	sessCtrl.ping = time.Tick(sessPingInterval)
 
@@ -216,8 +224,29 @@ func SetKeyValueDeletedCallback(f KeyValueDeletedCallback) {
 }
 
 // SetBulkDataResponseReceiver register a callback function when it received request from a DataStream.
-func SetBulkDataResponseReceiver(streamID string, receiver BulkDataResponseReceiver) {
+func SetBulkDataResponseReceiver(streamID string, receiver BulkDataResponseReceiver) error {
 	bulkDataResponseReceivers[strings.ToLower(streamID)] = receiver
+
+	ctrl := &sessCtrlSubscribeBulkDataResponse{
+		subscribe: &DeviceSubscribeBulkDataResponse{StreamID: streamID},
+		response:  make(chan error, 1),
+	}
+
+	sessCtrl.subscribeBulkDataResponse <- ctrl
+	return <-ctrl.response
+}
+
+func resubscribeBulkDataResponse() error {
+	logInfo("[Session] Start re-setting SubscribeBulkDataResponse")
+	defer logInfo("[Session] Finished re-setting SubscribeBulkDataResponse")
+
+	for streamID, receiver := range bulkDataResponseReceivers {
+		if err := SetBulkDataResponseReceiver(streamID, receiver); err != nil {
+			logError("[Session] Re subscriber failed to subsrive %s: %v", streamID, err)
+			return err
+		}
+	}
+	return nil
 }
 
 // When the device's connection session is in the "active" state, "pings"
@@ -231,14 +260,15 @@ func ConfigurePings(interval time.Duration, timeout time.Duration) {
 
 func initSession(dc *DeviceContext) error {
 	sess = &session{
-		dc:                    dc,
-		cmdQueue:              make(chan *DeviceCommand, commandQueueLength),
-		evtQueue:              make(chan *DeviceEvent, eventQueueLength),
-		bulkDataQueue:         make(chan *DeviceBulkData, bulkDataQueueLength),
-		syncedBulkDataCh:      make(chan *DeviceSyncedBulkData, 1),
-		bulkDataRequestQueue:  make(chan *DeviceBulkDataRequest, bulkDataRequestQueueLength),
-		bulkDataResponseQueue: make(chan *DeviceBulkDataResponse, bulkDataResponseQueueLength),
-		kvCache:               newKeyValueCache(dc),
+		dc:                             dc,
+		cmdQueue:                       make(chan *DeviceCommand, commandQueueLength),
+		evtQueue:                       make(chan *DeviceEvent, eventQueueLength),
+		bulkDataQueue:                  make(chan *DeviceBulkData, bulkDataQueueLength),
+		syncedBulkDataCh:               make(chan *DeviceSyncedBulkData, 1),
+		bulkDataRequestQueue:           make(chan *DeviceBulkDataRequest, bulkDataRequestQueueLength),
+		subscribeBulkDataResponseQueue: make(chan *DeviceSubscribeBulkDataResponse, subscribeBulkDataResponseQueueLength),
+		bulkDataResponseQueue:          make(chan *DeviceBulkDataResponse, bulkDataResponseQueueLength),
+		kvCache:                        newKeyValueCache(dc),
 	}
 
 	sess.startCommandProcessor()
@@ -246,7 +276,16 @@ func initSession(dc *DeviceContext) error {
 	go sess.kvCache.run()
 
 	logInfo("[Session] opening MQTT connection...")
-	conn, err := dc.openMQTTConn(sess.cmdQueue, sess.evtQueue, sess.bulkDataQueue, sess.syncedBulkDataCh, sess.bulkDataRequestQueue, sess.bulkDataResponseQueue, sess.kvCache.syncQueue, sess.kvCache.pushQueue)
+	conn, err := dc.openMQTTConn(
+		sess.cmdQueue,
+		sess.evtQueue,
+		sess.bulkDataQueue,
+		sess.syncedBulkDataCh,
+		sess.bulkDataRequestQueue,
+		sess.bulkDataResponseQueue,
+		sess.subscribeBulkDataResponseQueue,
+		sess.kvCache.syncQueue,
+		sess.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -300,7 +339,16 @@ func (s *session) reconnect() error {
 	}
 
 	logInfo("[Session] opening MQTT connection...")
-	conn, err := s.dc.openMQTTConn(s.cmdQueue, s.evtQueue, s.bulkDataQueue, s.syncedBulkDataCh, s.bulkDataRequestQueue, s.bulkDataResponseQueue, s.kvCache.syncQueue, s.kvCache.pushQueue)
+	conn, err := s.dc.openMQTTConn(
+		s.cmdQueue,
+		s.evtQueue,
+		s.bulkDataQueue,
+		s.syncedBulkDataCh,
+		s.bulkDataRequestQueue,
+		s.bulkDataResponseQueue,
+		s.subscribeBulkDataResponseQueue,
+		s.kvCache.syncQueue,
+		s.kvCache.pushQueue)
 
 	if err != nil {
 		return err
@@ -415,6 +463,9 @@ func sessionIdleLoop() {
 
 		case c := <-sessCtrl.sendBulkDataRequest:
 			c.response <- ErrorSessionNotStarted
+
+		case c := <-sessCtrl.subscribeBulkDataResponse:
+			c.response <- ErrorSessionNotStarted
 		}
 	}
 }
@@ -422,6 +473,8 @@ func sessionIdleLoop() {
 func sessionActiveLoop() {
 	logInfo("[SessionManager] entering active loop")
 	defer logInfo("[SessionManager] exiting active loop")
+
+	go resubscribeBulkDataResponse()
 
 	for {
 		select {
@@ -456,6 +509,10 @@ func sessionActiveLoop() {
 
 		case c := <-sessCtrl.sendBulkDataRequest:
 			sess.bulkDataRequestQueue <- c.request
+			c.response <- nil
+
+		case c := <-sessCtrl.subscribeBulkDataResponse:
+			sess.subscribeBulkDataResponseQueue <- c.subscribe
 			c.response <- nil
 
 		case c := <-sessCtrl.accessKV:
@@ -518,6 +575,9 @@ func sessionRecoveringLoop() {
 			c.response <- ErrorSessionRecovering
 
 		case c := <-sessCtrl.sendBulkDataRequest:
+			c.response <- ErrorSessionRecovering
+
+		case c := <-sessCtrl.subscribeBulkDataResponse:
 			c.response <- ErrorSessionRecovering
 
 		case c := <-sessCtrl.accessKV:

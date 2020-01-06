@@ -28,28 +28,29 @@ type (
 	}
 
 	mqttConn struct {
-		conn             net.Conn
-		stream           *packet.Stream
-		dc               *DeviceContext
-		packetID         uint16
-		subs             map[string]mqttSubscription
-		command          chan<- *DeviceCommand
-		event            <-chan *DeviceEvent
-		bulkData         <-chan *DeviceBulkData
-		syncedBulkData   <-chan *DeviceSyncedBulkData
-		bulkDataRequest  <-chan *DeviceBulkDataRequest
-		bulkDataResponse chan<- *DeviceBulkDataResponse
-		kvSync           chan<- *keyValueSync
-		kvPush           <-chan *keyValueSync
-		err              chan error
-		doPing           chan time.Duration
-		outPacket        chan packet.Packet
-		puback           chan *packet.PubackPacket
-		suback           chan *packet.SubackPacket
-		pingresp         chan *packet.PingrespPacket
-		stopPublisher    chan bool
-		wgWrite          sync.WaitGroup
-		wgRead           sync.WaitGroup
+		conn                      net.Conn
+		stream                    *packet.Stream
+		dc                        *DeviceContext
+		packetID                  uint16
+		subs                      map[string]mqttSubscription
+		command                   chan<- *DeviceCommand
+		event                     <-chan *DeviceEvent
+		bulkData                  <-chan *DeviceBulkData
+		syncedBulkData            <-chan *DeviceSyncedBulkData
+		bulkDataRequest           <-chan *DeviceBulkDataRequest
+		bulkDataResponse          chan<- *DeviceBulkDataResponse
+		subscribeBulkDataResponse <-chan *DeviceSubscribeBulkDataResponse
+		kvSync                    chan<- *keyValueSync
+		kvPush                    <-chan *keyValueSync
+		err                       chan error
+		doPing                    chan time.Duration
+		outPacket                 chan packet.Packet
+		puback                    chan *packet.PubackPacket
+		suback                    chan *packet.SubackPacket
+		pingresp                  chan *packet.PingrespPacket
+		stopPublisher             chan bool
+		wgWrite                   sync.WaitGroup
+		wgRead                    sync.WaitGroup
 	}
 )
 
@@ -363,6 +364,11 @@ func (mc *mqttConn) runPublisher() {
 			if err := mc.sendBulkDataRequest(b); err != nil {
 				logError("[MQTT] publisher failed to send bulkData request: %s", err.Error())
 			}
+		// This is subscribe request.
+		case s := <-mc.subscribeBulkDataResponse:
+			if err := mc.sendSubscribeBulkDataResponse(s); err != nil {
+				logError("[MQTT] subscriber failed to send subscribe topic request: %s", err.Error())
+			}
 
 		case kvSync := <-mc.kvPush:
 			if err := mc.sendKeyValueUpdate(kvSync); err != nil {
@@ -563,11 +569,11 @@ func (mc *mqttConn) sendBulkDataRequest(b *DeviceBulkDataRequest) error {
 	return errors.New("event dropped")
 }
 
-func (mc *mqttConn) sunscribeBulkDataResponse(streamID string) error {
+func (mc *mqttConn) sendSubscribeBulkDataResponse(sub *DeviceSubscribeBulkDataResponse) error {
 	p := packet.NewSubscribePacket()
 	p.PacketID = mc.getPacketID()
 
-	topic := fmt.Sprintf("/devices/%d/bulkData/%s/response", mc.dc.DeviceID, streamID)
+	topic := fmt.Sprintf("/devices/%d/bulkData/%s/response", mc.dc.DeviceID, sub.StreamID)
 
 	logInfo("[MQTT] subscribing to BulkData response topic %s", topic)
 	p.Subscriptions = []packet.Subscription{
@@ -600,7 +606,7 @@ func (mc *mqttConn) sunscribeBulkDataResponse(streamID string) error {
 			logInfo("[MQTT] subscription to topic %s succeeded with QOS %v", topic, ack.ReturnCodes[0])
 			mc.subs[topic] = mqttSubscription{
 				topic:      topic,
-				msgHandler: mc.bulkDataResponseReceiver(streamID),
+				msgHandler: mc.bulkDataResponseReceiver(sub.StreamID),
 			}
 			return nil
 		}
@@ -664,7 +670,17 @@ func (mc *mqttConn) sendKeyValueUpdate(kvSync *keyValueSync) error {
 	return errors.New("key-value update dropped")
 }
 
-func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <-chan *DeviceEvent, evtBulkDataQueue <-chan *DeviceBulkData, evtSyncedBulkDataCh <-chan *DeviceSyncedBulkData, bulkDataRequestQueue <-chan *DeviceBulkDataRequest, bulkDataResponseQueue chan<- *DeviceBulkDataResponse, kvSyncQueue chan<- *keyValueSync, kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
+func (dc *DeviceContext) openMQTTConn(
+	cmdQueue chan<- *DeviceCommand,
+	evtQueue <-chan *DeviceEvent,
+	evtBulkDataQueue <-chan *DeviceBulkData,
+	evtSyncedBulkDataCh <-chan *DeviceSyncedBulkData,
+	bulkDataRequestQueue <-chan *DeviceBulkDataRequest,
+	bulkDataResponseQueue chan<- *DeviceBulkDataResponse,
+	subscribeBulkDataResponseQueue <-chan *DeviceSubscribeBulkDataResponse,
+	kvSyncQueue chan<- *keyValueSync,
+	kvPushQueue <-chan *keyValueSync) (*mqttConn, error) {
+
 	mc := &mqttConn{
 		dc:   dc,
 		subs: make(map[string]mqttSubscription),
@@ -727,6 +743,7 @@ func (dc *DeviceContext) openMQTTConn(cmdQueue chan<- *DeviceCommand, evtQueue <
 	mc.syncedBulkData = evtSyncedBulkDataCh
 	mc.bulkDataRequest = bulkDataRequestQueue
 	mc.bulkDataResponse = bulkDataResponseQueue
+	mc.subscribeBulkDataResponse = subscribeBulkDataResponseQueue
 	mc.kvSync = kvSyncQueue
 	mc.kvPush = kvPushQueue
 	mc.doPing = make(chan time.Duration, 1)

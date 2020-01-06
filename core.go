@@ -67,14 +67,15 @@ var (
 	keyValueUpdateRetryInterval      = time.Second * 5
 
 	// TBD: how much buffering should we allow?
-	eventQueueLength            = 128
-	bulkDataQueueLength         = 128
-	commandQueueLength          = 128
-	keyValueSyncQueueLength     = 128
-	keyValuePushQueueLength     = 128
-	keyValueCallbackQueueLength = 128
-	bulkDataRequestQueueLength  = 128
-	bulkDataResponseQueueLength = 128
+	eventQueueLength                     = 128
+	bulkDataQueueLength                  = 128
+	commandQueueLength                   = 128
+	keyValueSyncQueueLength              = 128
+	keyValuePushQueueLength              = 128
+	keyValueCallbackQueueLength          = 128
+	bulkDataRequestQueueLength           = 128
+	subscribeBulkDataResponseQueueLength = 128
+	bulkDataResponseQueueLength          = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies
@@ -204,6 +205,12 @@ type (
 		RequestID string                 `json:"requestId"`
 		Payload   map[string]interface{} `json:"payload"`
 		qos       QOSLevel               // not exported to serializer
+	}
+
+	// DeviceSubscribeBulkDataResponse is request of subscribing bulk data response topic.
+	DeviceSubscribeBulkDataResponse struct {
+		StreamID string
+		qos      QOSLevel
 	}
 
 	// DeviceBulkDataResponse is response struct of "request/response" for bulkData.
