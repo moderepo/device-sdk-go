@@ -583,6 +583,8 @@ func (mc *mqttConn) sendSubscribeBulkDataResponse(sub *DeviceSubscribeBulkDataRe
 		},
 	}
 
+	mc.outPacket <- p
+
 	select {
 	case <-time.After(deviceEventRetryInterval):
 		msg := fmt.Sprintf("did not receive SUBACK of event delivery for packet ID %d", p.PacketID)
@@ -593,7 +595,7 @@ func (mc *mqttConn) sendSubscribeBulkDataResponse(sub *DeviceSubscribeBulkDataRe
 		if ack.PacketID == p.PacketID {
 			logInfo("[MQTT] received SUBACK for packet ID %d", ack.PacketID)
 
-			if len(ack.ReturnCodes) != 0 {
+			if len(ack.ReturnCodes) != 1 {
 				logError("[MQTT] received SUBACK packet with incorrect number of return codes: expect 1; got %d", len(ack.ReturnCodes))
 				return errors.New("invalid packet")
 			}
