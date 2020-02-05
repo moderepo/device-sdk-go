@@ -2,6 +2,7 @@ package mode
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -10,24 +11,24 @@ import (
 )
 
 type TestMqttDelegate struct {
-	username      string
-	password      string
-	subscriptions []string
-	subRecvCh     chan MqttSubData
-	queueAckCh    chan MqttQueueResult
-	pingAckCh     chan bool
+	username        string
+	password        string
+	subscriptions   []string
+	subRecvCh       chan MqttSubData
+	queueAckCh      chan MqttResponse
+	pingAckCh       chan MqttResponse
+	responseTimeout time.Duration
 }
 
 func newTestMqttDelegate() *TestMqttDelegate {
 	return &TestMqttDelegate{
-		// This is a user level password, which I can change, but it still
-		// shouldn't be in here. But, how else do you do automated tests in a
-		// public server?
-		username:   "good",
-		password:   "anything",
-		subRecvCh:  make(chan MqttSubData),
-		queueAckCh: make(chan MqttQueueResult),
-		pingAckCh:  make(chan bool),
+		username:  "good",
+		password:  "anything",
+		subRecvCh: make(chan MqttSubData),
+		// in practice, this would be buffered
+		queueAckCh:      make(chan MqttResponse),
+		pingAckCh:       make(chan MqttResponse, 2),
+		responseTimeout: 2 * time.Second,
 	}
 }
 
@@ -36,25 +37,30 @@ func invalidTestMqttDelegate() TestMqttDelegate {
 		username:   "foo",
 		password:   "bar",
 		subRecvCh:  make(chan MqttSubData),
-		queueAckCh: make(chan MqttQueueResult),
-		pingAckCh:  make(chan bool),
+		queueAckCh: make(chan MqttResponse),
+		pingAckCh:  make(chan MqttResponse),
 	}
+}
+
+func (del TestMqttDelegate) TLSUsageAndConfiguration() (useTLS bool,
+	tlsConfig *tls.Config) {
+	return useTLS, nil
 }
 
 func (del TestMqttDelegate) AuthInfo() (username string, password string) {
 	return del.username, del.password
 }
 
-func (del TestMqttDelegate) ReceiveChannels() (chan<- MqttSubData,
-	chan<- MqttQueueResult, chan<- bool) {
+func (del TestMqttDelegate) GetChannels() (chan<- MqttSubData,
+	chan MqttResponse, chan MqttResponse) {
 	return del.subRecvCh, del.queueAckCh, del.pingAckCh
 }
 
-func (del TestMqttDelegate) RequestTimeout() time.Duration {
-	return requestTimeout
+func (del TestMqttDelegate) OutgoingQueueSize() uint16 {
+	return 2
 }
 
-func (del TestMqttDelegate) Subscriptions() []string {
+func (del TestMqttDelegate) GetSubscriptions() []string {
 	// could do this in the initializer, but then we can't bind it to this
 	// instance of the delegate
 	del.subscriptions = []string{
@@ -64,16 +70,19 @@ func (del TestMqttDelegate) Subscriptions() []string {
 	return del.subscriptions
 }
 
-func (del TestMqttDelegate) Close() {
+func (del TestMqttDelegate) OnClose() {
 	// Nothing to do
 }
 
-func testConnection(t *testing.T, delegate MqttDelegate,
+func (del TestMqttDelegate) createContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), del.responseTimeout)
+}
+
+func testConnection(ctx context.Context, t *testing.T, delegate MqttDelegate,
 	expectError bool) *MqttClient {
 
-	client := NewMqttClient(testMqttHost, testMqttPort, nil, useTLS,
-		delegate)
-	err := client.Connect()
+	client := NewMqttClient(testMqttHost, testMqttPort, delegate)
+	err := client.Connect(ctx)
 	if expectError {
 		if err == nil {
 			t.Errorf("Did not receive expected error")
@@ -99,19 +108,20 @@ func TestMqttClientConnection(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientConnction: test bad user/pass")
 	badDelegate := invalidTestMqttDelegate()
 	fmt.Println("Hitting server")
-	testConnection(t, badDelegate, true)
+	testConnection(ctx, t, badDelegate, true)
 
 	fmt.Println("TestMqttClientConnction: test good user/pass")
 	goodDelegate := newTestMqttDelegate()
 	//client := testConnection(t, goodDelegate, false)
-	testConnection(t, goodDelegate, false)
-	// if client.Disconnect() != nil {
-	// 	t.Errorf("error disconnecting")
-	// }
+	client := testConnection(ctx, t, goodDelegate, false)
+
+	if client.Disconnect(ctx) != nil {
+		t.Errorf("error disconnecting")
+	}
 
 	cancel()
 	wg.Wait()
@@ -121,15 +131,15 @@ func TestMqttClientSubscribe(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientSubscribe")
 	goodDelegate := newTestMqttDelegate()
-	client := testConnection(t, goodDelegate, false)
-	if err := client.Subscribe(); err != nil {
-		t.Errorf("failed to subscribe: %s", err)
+	client := testConnection(ctx, t, goodDelegate, false)
+	if errs := client.Subscribe(ctx); errs != nil {
+		t.Errorf("failed to subscribe: %s", errs)
 	}
 
-	if client.Disconnect() != nil {
+	if client.Disconnect(ctx) != nil {
 		t.Errorf("error disconnecting")
 	}
 	cancel()
@@ -140,10 +150,10 @@ func TestMqttClientPublish(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientPublish")
 	goodDelegate := newTestMqttDelegate()
-	client := testConnection(t, goodDelegate, false)
+	client := testConnection(ctx, t, goodDelegate, false)
 
 	topic := fmt.Sprintf("/devices/%s/event", goodDelegate.username)
 	event := DeviceEvent{
@@ -155,7 +165,7 @@ func TestMqttClientPublish(t *testing.T) {
 	if err != nil {
 		t.Errorf("Publish send failed: %s", err)
 	}
-	packetId, err := client.Publish(event.Qos, topic, rawData)
+	packetId, err := client.Publish(ctx, event.Qos, topic, rawData)
 	if err != nil {
 		t.Errorf("Publish send failed: %s", err)
 	}
@@ -165,52 +175,88 @@ func TestMqttClientPublish(t *testing.T) {
 	if ackData.Err != nil {
 		t.Errorf("Publish ack failed: %s", ackData.Err)
 	}
-	if packetId != ackData.PacketId {
+	if packetId != ackData.PacketID {
 		t.Errorf("Publish: Id and ack id do not match: %d, %d",
-			packetId, ackData.PacketId)
+			packetId, ackData.PacketID)
 	}
 
-	if client.Disconnect() != nil {
+	if client.Disconnect(ctx) != nil {
 		t.Errorf("error disconnecting")
 	}
 	cancel()
 	wg.Wait()
 }
 
-func TestMqttClientPing(t *testing.T) {
-	fmt.Println("TestMqttClientPing")
-	var wg sync.WaitGroup
-	serverCtx, serverCancel := context.WithCancel(context.Background())
-	wg.Add(1)
-	dummyMQTTD(serverCtx, &wg, publishNone)
-
-	goodDelegate := newTestMqttDelegate()
-	client := testConnection(t, goodDelegate, false)
-
-	if err := client.Ping(); err != nil {
-		t.Errorf("Ping send failed: %s", err)
+func sendPing(ctx context.Context, t *testing.T, client *MqttClient,
+	del *TestMqttDelegate) error {
+	if err := client.Ping(ctx); err != nil {
+		return err
 	}
-
-	// Wait for the ack, or timeout
-	ctx, cancel := context.WithTimeout(context.Background(),
-		client.delegate.RequestTimeout())
-	defer cancel()
 
 	// Block on the return channel or timeout
 	select {
-	case ret := <-goodDelegate.pingAckCh:
-		// There's not really a way to return false, but, since it's bool, we'll
-		// check
-		if !ret {
-			t.Errorf("Ping response was false")
+	case resp := <-del.pingAckCh:
+		if resp.Err != nil {
+			// This is always an error
+			t.Errorf("Ping response returned error: %s", resp.Err)
 		}
 	case <-ctx.Done():
-		t.Errorf("Ping response timeout: %s", ctx.Err())
+		// If we're testing timeouts, this is expected. Not always test
+		// failure
+		return fmt.Errorf("Timed out waiting for ping response")
 	}
 
-	if client.Disconnect() != nil {
+	return nil
+}
+
+func TestMqttClientPing(t *testing.T) {
+	fmt.Println("TestMqttClientPing")
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	dummyMQTTD(ctx, &wg, nil)
+
+	goodDelegate := newTestMqttDelegate()
+	client := testConnection(ctx, t, goodDelegate, false)
+
+	err := sendPing(ctx, t, client, goodDelegate)
+	if err != nil {
+		t.Errorf("ping failed")
+	}
+
+	if client.Disconnect(ctx) != nil {
 		t.Errorf("error disconnecting")
 	}
-	serverCancel()
+	logInfo("Cancel to server to finish")
+	cancel()
+	wg.Wait()
+}
+
+func TestMqttClientPingWithTimeout(t *testing.T) {
+	fmt.Println("TestMqttClientPingWithTimeout")
+	var wg sync.WaitGroup
+	wg.Add(1)
+	cmdCh := make(chan dummyCmd)
+	dummyMQTTD(nil, &wg, cmdCh)
+
+	goodDelegate := newTestMqttDelegate()
+	ctx, cancel := goodDelegate.createContext()
+	defer cancel()
+	client := testConnection(ctx, t, goodDelegate, false)
+
+	cmdCh <- slowdownServerCmd
+	// Wait for the ack, or timeout
+	err := sendPing(ctx, t, client, goodDelegate)
+	if err != nil {
+		logInfo("Received expected error: %s", err)
+	} else {
+		t.Errorf("Ping succeeded but should have timed out")
+	}
+
+	// This apparently closes our server connection, so we won't disconnect
+	// but in the real case, the connection might just be slow
+
+	logInfo("Sending cancel to server")
+	cmdCh <- shutdownCmd
 	wg.Wait()
 }
