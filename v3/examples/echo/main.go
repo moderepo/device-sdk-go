@@ -24,7 +24,7 @@ var (
 )
 
 func pingLoop(ctx context.Context, client *mode.MqttClient,
-	timeout time.Duration, pingRecv <-chan bool, wg *sync.WaitGroup) {
+	timeout time.Duration, pingRecv <-chan mode.MqttResponse, wg *sync.WaitGroup) {
 
 	defer func() {
 		fmt.Println("Exiting ping loop")
@@ -43,11 +43,11 @@ func pingLoop(ctx context.Context, client *mode.MqttClient,
 
 		// Block on the return channel or timeout
 		select {
-		case ret := <-pingRecv:
+		case resp := <-pingRecv:
 			// There's not really a way to return false, but, since it's bool,
 			// we'll check
 			fmt.Println("Got ping response")
-			if !ret {
+			if resp.Err != nil {
 				fmt.Println("sender closed ping channel")
 				return
 			}
@@ -81,11 +81,11 @@ func waitForAck(delegate *mode.ModeMqttDelegate) uint16 {
 
 	// Block on the return channel or timeout
 	select {
-	case queueRes := <-delegate.QueueAckCh:
-		if queueRes.Err != nil {
-			fmt.Printf("Queued request failed: %s\n", queueRes.Err)
+	case queueResp := <-delegate.QueueAckCh:
+		if queueResp.Err != nil {
+			fmt.Printf("Queued request failed: %s\n", queueResp.Err)
 		} else {
-			return queueRes.PacketId
+			return queueResp.PacketID
 		}
 	case <-ctx.Done():
 		fmt.Printf("Ack response timeout: %s\n", ctx.Err())
@@ -137,8 +137,7 @@ func main() {
 	kvSyncQueue := make(chan *mode.KeyValueSync, 16)
 	delegate := mode.NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue)
 
-	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, nil,
-		modeUseTLS, delegate)
+	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, delegate)
 	if err := client.Connect(); err != nil {
 		fmt.Printf("Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
 		os.Exit(1)

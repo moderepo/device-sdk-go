@@ -3,6 +3,8 @@ package mode
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,49 +62,80 @@ type (
 		dc            *DeviceContext
 		subscriptions map[string]mqttMsgHandler
 
-		requestTimeout time.Duration
+		receiveQueueSize uint16
+		sendQueueSize    uint16
+		responseTimeout  time.Duration
 
 		// For handling our subscriptions. Output
 		command chan<- *DeviceCommand
 		kvSync  chan<- *KeyValueSync
 
-		// For receiving data from the API. Input (but we create and manage
-		// them)
-		SubRecvCh  chan MqttSubData
-		QueueAckCh chan MqttQueueResult
-		PingAckCh  chan bool
+		// For receiving data from the API. Input
+		SubRecvCh  <-chan MqttSubData
+		QueueAckCh <-chan MqttResponse
+		PingAckCh  <-chan MqttResponse
 	}
 )
 
+type (
+	ModeMqttOptDuration    time.Duration
+	ModeMqttOptQueueLength int16
+
+	ModeMqttDelegateOpt interface {
+		apply(d *ModeMqttDelegate)
+	}
+)
+
+func (dur ModeMqttOptDuration) apply(del *ModeMqttDelegate) {
+	del.responseTimeout = time.Duration(dur)
+}
+
+func (len ModeMqttOptQueueLength) apply(del *ModeMqttDelegate) {
+	del.sendQueueSize = uint16(len)
+}
+
 // Maybe have the channel sizes as parameters.
-func NewModeMqttDelegate(dc *DeviceContext, cmdQueue chan<- *DeviceCommand,
-	kvSyncQueue chan<- *KeyValueSync) *ModeMqttDelegate {
+func NewModeMqttDelegate(
+	dc *DeviceContext,
+	cmdQueue chan<- *DeviceCommand,
+	kvSyncQueue chan<- *KeyValueSync,
+	opts ...ModeMqttDelegateOpt) *ModeMqttDelegate {
 	del := &ModeMqttDelegate{
-		dc:             dc,
-		requestTimeout: 4 * time.Second,
-		command:        cmdQueue,
-		kvSync:         kvSyncQueue,
-		SubRecvCh:      make(chan MqttSubData),
-		QueueAckCh:     make(chan MqttQueueResult),
-		PingAckCh:      make(chan bool),
+		dc:               dc,
+		receiveQueueSize: 8,               // some default
+		sendQueueSize:    8,               // some default
+		responseTimeout:  2 * time.Second, // some default
+		command:          cmdQueue,
+		kvSync:           kvSyncQueue,
+		SubRecvCh:        make(chan MqttSubData),
+		QueueAckCh:       make(chan MqttResponse),
+		PingAckCh:        make(chan MqttResponse),
 	}
 	subs := make(map[string]mqttMsgHandler)
 	subs[fmt.Sprintf("/devices/%d/command", dc.DeviceID)] = del.handleCommandMsg
 	subs[fmt.Sprintf("/devices/%d/kv", dc.DeviceID)] = del.handleKeyValueMsg
 
 	del.subscriptions = subs
+
+	for _, opt := range opts {
+		opt.apply(del)
+	}
 	return del
+}
+
+func (del *ModeMqttDelegate) GetDeviceContext() *DeviceContext {
+	return del.dc
 }
 
 // Non-MqttDelegate method to listen on subscriptions and pass the interpreted
 // data to the appropriate channel (kvSync or command)
-func (del ModeMqttDelegate) RunSubscriptionListener() {
+func (del *ModeMqttDelegate) RunSubscriptionListener() {
 
 	for {
 		select {
 		case subData := <-del.SubRecvCh:
 			subBytes := subData.data
-			// Determine which callback to call based on the
+			// Determine which callback to call based on the topic
 			if handler, exists := del.subscriptions[subData.topic]; exists {
 				if err := handler(subBytes); err != nil {
 					logError("Error in subscription handler: %s", err)
@@ -114,22 +147,34 @@ func (del ModeMqttDelegate) RunSubscriptionListener() {
 	}
 }
 
-func (del ModeMqttDelegate) AuthInfo() (username string, password string) {
+func (del *ModeMqttDelegate) TLSUsageAndConfiguration() (useTLS bool,
+	tlsConfig *tls.Config) {
+	// useTLS is a package level variable
+	return useTLS, del.dc.TLSConfig
+}
+
+func (del *ModeMqttDelegate) AuthInfo() (username string, password string) {
 	// format as decimal
 	return strconv.FormatUint(del.dc.DeviceID, 10), del.dc.AuthToken
 }
 
-func (del ModeMqttDelegate) ReceiveChannels() (subRecvCh chan<- MqttSubData,
-	pubAckCh chan<- MqttQueueResult,
-	pingAckCh chan<- bool) {
-	return del.SubRecvCh, del.QueueAckCh, del.PingAckCh
+func (del *ModeMqttDelegate) SetReceiveChannels(subRecvCh <-chan MqttSubData,
+	queueAckCh <-chan MqttResponse,
+	pingAckCh <-chan MqttResponse) {
+	del.SubRecvCh = subRecvCh
+	del.QueueAckCh = queueAckCh
+	del.PingAckCh = pingAckCh
 }
 
-func (del ModeMqttDelegate) RequestTimeout() time.Duration {
-	return del.requestTimeout
+func (del *ModeMqttDelegate) GetReceiveQueueSize() uint16 {
+	return del.receiveQueueSize
 }
 
-func (del ModeMqttDelegate) Subscriptions() []string {
+func (del *ModeMqttDelegate) GetSendQueueSize() uint16 {
+	return del.sendQueueSize
+}
+
+func (del *ModeMqttDelegate) GetSubscriptions() []string {
 	keys := make([]string, len(del.subscriptions))
 
 	i := 0
@@ -140,12 +185,16 @@ func (del ModeMqttDelegate) Subscriptions() []string {
 	return keys
 }
 
-func (del ModeMqttDelegate) Close() {
+func (del *ModeMqttDelegate) OnClose() {
 	close(del.command)
 	close(del.kvSync)
 }
 
-func (del ModeMqttDelegate) handleCommandMsg(data []byte) error {
+func (del *ModeMqttDelegate) createContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), del.responseTimeout)
+}
+
+func (del *ModeMqttDelegate) handleCommandMsg(data []byte) error {
 	var cmd struct {
 		Action     string          `json:"action"`
 		Parameters json.RawMessage `json:"parameters"`
@@ -164,7 +213,7 @@ func (del ModeMqttDelegate) handleCommandMsg(data []byte) error {
 	return nil
 }
 
-func (del ModeMqttDelegate) handleKeyValueMsg(data []byte) error {
+func (del *ModeMqttDelegate) handleKeyValueMsg(data []byte) error {
 	var kvSync KeyValueSync
 
 	if err := decodeOpaqueJSON(data, &kvSync); err != nil {
@@ -183,18 +232,17 @@ func (del ModeMqttDelegate) handleKeyValueMsg(data []byte) error {
 
 // Mode extensions to the MqttClient
 // cast to the concrete delegate
-func (client *MqttClient) getModeDelegate() (*ModeMqttDelegate, error) {
+func (client *MqttClient) GetModeDelegate() (*ModeMqttDelegate, error) {
 	implDelegate, ok := client.delegate.(*ModeMqttDelegate)
 	if !ok {
 		return implDelegate, fmt.Errorf("MqttClient was not created with Mode Delegate")
-	} else {
-		return implDelegate, nil
 	}
+	return implDelegate, nil
 }
 
 // Helper function to send DeviceEvent instances
 func (client *MqttClient) PublishEvent(event DeviceEvent) (uint16, error) {
-	modeDel, err := client.getModeDelegate()
+	modeDel, err := client.GetModeDelegate()
 	if err != nil {
 		return 0, err
 	}
@@ -204,16 +252,17 @@ func (client *MqttClient) PublishEvent(event DeviceEvent) (uint16, error) {
 		return 0, err
 	}
 	topic := fmt.Sprintf("/devices/%d/event", modeDel.dc.DeviceID)
-
-	return client.Publish(event.Qos, topic, payload)
+	ctx, cancel := modeDel.createContext()
+	defer cancel()
+	return client.Publish(ctx, event.Qos, topic, payload)
 }
 
 // Helper function to send DeviceEvent instances. This replaces both the
 // sendBulkData and writeBulkData methods in the old API (since it does less
-// than both, covering just the intersection of the other
+// than both, covering just the intersection)
 func (client *MqttClient) PublishBulkData(bulkData DeviceBulkData) (uint16,
 	error) {
-	modeDel, err := client.getModeDelegate()
+	modeDel, err := client.GetModeDelegate()
 	if err != nil {
 		return 0, err
 	}
@@ -221,7 +270,9 @@ func (client *MqttClient) PublishBulkData(bulkData DeviceBulkData) (uint16,
 	topic := fmt.Sprintf("/devices/%d/bulkData/%s", modeDel.dc.DeviceID,
 		bulkData.StreamID)
 
-	return client.Publish(bulkData.Qos, topic, bulkData.Blob)
+	ctx, cancel := modeDel.createContext()
+	defer cancel()
+	return client.Publish(ctx, bulkData.Qos, topic, bulkData.Blob)
 }
 
 // The key value store should typically be cached. Key Values are all sent on
@@ -231,7 +282,7 @@ func (client *MqttClient) PublishBulkData(bulkData DeviceBulkData) (uint16,
 // XXX: Looks like there's a reload, so I must be missing something.
 func (client *MqttClient) PublishKeyValueUpdate(kvData KeyValueSync) (uint16,
 	error) {
-	modeDel, err := client.getModeDelegate()
+	modeDel, err := client.GetModeDelegate()
 	if err != nil {
 		return 0, err
 	}
@@ -243,7 +294,9 @@ func (client *MqttClient) PublishKeyValueUpdate(kvData KeyValueSync) (uint16,
 	topic := fmt.Sprintf("/devices/%d/kv", modeDel.dc.DeviceID)
 
 	// Hardcode QOS1
-	return client.Publish(QOSAtLeastOnce, topic, payload)
+	ctx, cancel := modeDel.createContext()
+	defer cancel()
+	return client.Publish(ctx, QOSAtLeastOnce, topic, payload)
 }
 
 // A special JSON decoder that makes sure numbers in command parameters
