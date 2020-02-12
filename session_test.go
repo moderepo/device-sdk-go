@@ -79,7 +79,6 @@ func dummyMQTTD(pubCallback func(*packet.PublishPacket) bool) {
 		}
 		conn.Close()
 	}
-	return
 }
 
 func TestSession(t *testing.T) {
