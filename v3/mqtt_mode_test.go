@@ -44,7 +44,8 @@ func newModeMqttDelegate() (*ModeMqttDelegate, chan *DeviceCommand,
 // Helper for some tests
 func testModeConnection(ctx context.Context, t *testing.T,
 	delegate *ModeMqttDelegate, expectError bool) *MqttClient {
-	client := NewMqttClient(modeMqttHost, modeMqttPort, delegate)
+	client := NewMqttClient(modeMqttHost, modeMqttPort,
+		WithMqttDelegate(delegate))
 	ctx, cancel := delegate.createContext()
 	defer cancel()
 	err := client.Connect(ctx)
@@ -170,7 +171,7 @@ func TestModeMqttClientPublishEvent(t *testing.T) {
 	}
 
 	var packetID uint16
-	packetID, err := client.PublishEvent(event)
+	packetID, err := client.PublishEvent(ctx, event)
 	assert.Nil(t, err, "Publish failed")
 
 	fmt.Println("QOS 0. No ACK, so make sure we don't get one")
@@ -179,7 +180,7 @@ func TestModeMqttClientPublishEvent(t *testing.T) {
 
 	fmt.Println("Testing ACK for QOS 1")
 	event.Qos = QOSAtLeastOnce
-	packetID, err = client.PublishEvent(event)
+	packetID, err = client.PublishEvent(ctx, event)
 	assert.Nil(t, err, "Publish failed")
 
 	returnID = testModeWaitForPubAck(t, goodDelegate, false)
@@ -209,7 +210,7 @@ func TestModeMqttClientPublishBulkData(t *testing.T) {
 		Blob:     []byte("blob"),
 		Qos:      QOSAtMostOnce,
 	}
-	_, err := client.PublishBulkData(bulk)
+	_, err := client.PublishBulkData(ctx, bulk)
 	assert.Nil(t, err, "PublishDeviceBulkData send failed")
 
 	logInfo("[MQTT Test] disconnecting")
@@ -239,7 +240,7 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	}
 
 	// Set the value
-	packetID, err := client.PublishKeyValueUpdate(kvData)
+	packetID, err := client.PublishKeyValueUpdate(ctx, kvData)
 	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
 
 	returnID := testModeWaitForPubAck(t, goodDelegate, false)
@@ -248,7 +249,7 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	// Reload the value
 	kvData.Action = KVSyncActionReload
 
-	packetID, err = client.PublishKeyValueUpdate(kvData)
+	packetID, err = client.PublishKeyValueUpdate(ctx, kvData)
 	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
 
 	returnID = testModeWaitForPubAck(t, goodDelegate, true)
@@ -257,7 +258,7 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	// Delete the value
 	kvData.Action = KVSyncActionDelete
 
-	packetID, err = client.PublishKeyValueUpdate(kvData)
+	packetID, err = client.PublishKeyValueUpdate(ctx, kvData)
 	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
 
 	returnID = testModeWaitForPubAck(t, goodDelegate, true)
@@ -282,7 +283,8 @@ func TestModeMqttClientReceiveKVSync(t *testing.T) {
 
 	fmt.Println("TestModeMqttClientReceiveKvSync")
 	goodDelegate, _, kvSyncChannel := newModeMqttDelegate()
-	client := NewMqttClient(modeMqttHost, modeMqttPort, goodDelegate)
+	client := NewMqttClient(modeMqttHost, modeMqttPort,
+		WithMqttDelegate(goodDelegate))
 	client.Connect(ctx)
 	// Tell the server to send a kv update
 	cmdCh <- publishKvCmd
@@ -326,7 +328,8 @@ func TestModeMqttClientReceiveCommand(t *testing.T) {
 
 	fmt.Println("TestModeMqttClientReceiveCommand")
 	goodDelegate, cmdChannel, _ := newModeMqttDelegate()
-	client := NewMqttClient(modeMqttHost, modeMqttPort, goodDelegate)
+	client := NewMqttClient(modeMqttHost, modeMqttPort,
+		WithMqttDelegate(goodDelegate))
 	ctx, cancel := goodDelegate.createContext()
 	defer cancel()
 	client.Connect(ctx)

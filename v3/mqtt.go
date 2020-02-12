@@ -84,22 +84,19 @@ type (
 		Errs     []error
 	}
 
-	// MqttDelegate should be implemented by users of MqttClient. Three
-	// responsibilities (Oops. single responsibility, blah blah.):
-	// - data needed to establish a connection
-	// - Callback method to create data to publish
-	// - channels to communicate data back to a receiver.
-	// These methods should be const, since we might call them frequently.
-	// I think this could be broken up - maybe a struct for the channels, with
-	// another interface (and the struct implement the interface if desired).
-	// But this is sufficient for now.
-	MqttDelegate interface {
+	// MqttAuthDelegate methods provide the security and authentication
+	// information to start a connection to the MqttServer
+	MqttAuthDelegate interface {
 		// Returns the tls usage and configuration. If useTLS is false, a nil
 		// tlsConfig should be returned.
 		TLSUsageAndConfiguration() (useTLS bool, tlsConfig *tls.Config)
 		// Returns authentication information
 		AuthInfo() (username string, password string)
+	}
 
+	// MqttReceiverDelegate methods allow the MqttClient to communicate
+	// information and events back to the user.
+	MqttReceiverDelegate interface {
 		// SetReceiveChannels will be called by the MqttClient. The MqttClient
 		// will create the channels with the buffer size returned by
 		// GetReceieveQueueSize(). The implementor of the delegate will use
@@ -117,6 +114,13 @@ type (
 			queueAckCh <-chan MqttResponse,
 			pingAckCh <-chan MqttResponse)
 
+		// Hook so we can clean up on closing of connections
+		OnClose()
+	}
+
+	// MqttConfigDelegate methods allow the MqttClient to configure itself
+	// according to the requirements of the user
+	MqttConfigDelegate interface {
 		// Buffer size of the incoming queues to the delegate. This is the
 		// size of the three receive channels
 		GetReceiveQueueSize() uint16
@@ -127,9 +131,15 @@ type (
 
 		// Retrieve the topics for this delegate
 		Subscriptions() []string
+	}
 
-		// Hook so we can clean up on closing of connections
-		OnClose()
+	// MqttDelegate is the combined required interfaces that must be implemented
+	// to use the MqttClient. This is a convenience that the user can use to
+	// allow a single struct to implement all the required interfaces
+	MqttDelegate interface {
+		MqttAuthDelegate
+		MqttReceiverDelegate
+		MqttConfigDelegate
 	}
 
 	// MqttClient provides the public API to MQTT. We handle
@@ -145,7 +155,9 @@ type (
 	MqttClient struct {
 		mqttHost     string
 		mqttPort     int
-		delegate     MqttDelegate
+		authDelegate MqttAuthDelegate
+		recvDelegate MqttReceiverDelegate
+		confDelegate MqttConfigDelegate
 		conn         *mqttConn
 		wgSend       sync.WaitGroup
 		writerCancel context.CancelFunc
@@ -208,16 +220,51 @@ type (
 	}
 )
 
+func WithMqttAuthDelegate(authDelegate MqttAuthDelegate) func(*MqttClient) {
+	return func(c *MqttClient) {
+		c.authDelegate = authDelegate
+	}
+}
+
+func WithMqttReceiverDelegate(recvDelegate MqttReceiverDelegate) func(*MqttClient) {
+	return func(c *MqttClient) {
+		c.recvDelegate = recvDelegate
+	}
+}
+
+func WithMqttConfigDelegate(confDelegate MqttConfigDelegate) func(*MqttClient) {
+	return func(c *MqttClient) {
+		c.confDelegate = confDelegate
+	}
+}
+
+func WithMqttDelegate(delegate MqttDelegate) func(*MqttClient) {
+	return func(c *MqttClient) {
+		c.authDelegate = delegate
+		c.recvDelegate = delegate
+		c.confDelegate = delegate
+	}
+}
+
 // NewMqttClient will create client and open a stream. A client is invalid if
 // not connected, and you need to create a new client to reconnect.
 func NewMqttClient(mqttHost string, mqttPort int,
-	delegate MqttDelegate) *MqttClient {
-	return &MqttClient{
+	dels ...func(*MqttClient)) *MqttClient {
+	client := &MqttClient{
 		mqttHost: mqttHost,
 		mqttPort: mqttPort,
-		delegate: delegate,
 	}
 
+	for _, del := range dels {
+		del(client)
+	}
+
+	if client.authDelegate != nil && client.recvDelegate != nil &&
+		client.confDelegate != nil {
+		return client
+	}
+
+	return nil
 }
 
 // IsConnected will return true if we have a successfully CONNACK'ed response.
@@ -239,7 +286,7 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 		return errors.New("Cannot connect when already connected")
 	}
 	client.createMqttConnection()
-	user, pwd := client.delegate.AuthInfo()
+	user, pwd := client.authDelegate.AuthInfo()
 	p := packet.NewConnectPacket()
 	p.Version = packet.Version311
 	p.Username = user
@@ -293,7 +340,7 @@ func (client *MqttClient) Subscribe(ctx context.Context) []error {
 	p.Subscriptions = make([]packet.Subscription, 0, 10)
 	p.PacketID = client.conn.getPacketID()
 
-	subs := client.delegate.Subscriptions()
+	subs := client.confDelegate.Subscriptions()
 	for _, sub := range subs {
 		// We have no protection to keep you from subscribing to the same
 		// topic multiple times. Maybe we should? Maybe the server would send
@@ -374,14 +421,14 @@ func (client *MqttClient) Publish(ctx context.Context, qos QOSLevel,
 
 // Each connect, we need to create a new mqttConnection.
 func (client *MqttClient) createMqttConnection() {
-	receiveQueueSize := client.delegate.GetReceiveQueueSize()
+	receiveQueueSize := client.confDelegate.GetReceiveQueueSize()
 	subRecvCh := make(chan MqttSubData, receiveQueueSize)
 	queueAckCh := make(chan MqttResponse, receiveQueueSize)
 	pingAckCh := make(chan MqttResponse, receiveQueueSize)
-	client.delegate.SetReceiveChannels(subRecvCh, queueAckCh, pingAckCh)
+	client.recvDelegate.SetReceiveChannels(subRecvCh, queueAckCh, pingAckCh)
 	client.delegateSubRecvCh = subRecvCh
-	useTLS, tlsConfig := client.delegate.TLSUsageAndConfiguration()
-	sendQueueSize := client.delegate.GetSendQueueSize()
+	useTLS, tlsConfig := client.authDelegate.TLSUsageAndConfiguration()
+	sendQueueSize := client.confDelegate.GetSendQueueSize()
 	conn := newMqttConn(tlsConfig, client.mqttHost, client.mqttPort, useTLS,
 		queueAckCh, pingAckCh, sendQueueSize)
 
@@ -418,7 +465,7 @@ func (client *MqttClient) shutdownConnection() {
 	// 5. Wait for the packet reader to finish
 	client.wgRecv.Wait()
 	// 6. Notify the client that we are disconnecting
-	client.delegate.OnClose()
+	client.recvDelegate.OnClose()
 	// 6. Close the channels for handling responses
 	close(client.conn.connRespCh)
 	close(client.conn.subRespCh)

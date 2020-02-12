@@ -12,16 +12,55 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type TestMqttDelegate struct {
-	username         string
-	password         string
-	subscriptions    []string
-	receiveQueueSize uint16
-	sendQueueSize    uint16
-	responseTimeout  time.Duration
-	subRecvCh        <-chan MqttSubData
-	queueAckCh       <-chan MqttResponse
-	pingAckCh        <-chan MqttResponse
+type (
+	TestMqttDelegate struct {
+		username         string
+		password         string
+		subscriptions    []string
+		receiveQueueSize uint16
+		sendQueueSize    uint16
+		responseTimeout  time.Duration
+		subRecvCh        <-chan MqttSubData
+		queueAckCh       <-chan MqttResponse
+		pingAckCh        <-chan MqttResponse
+	}
+
+	// Testing with single responsibility delegates
+	TestMqttAuthDelegate struct {
+	}
+	TestMqttReceiverDelegate struct {
+	}
+	TestMqttConfigDelegate struct {
+	}
+)
+
+func (*TestMqttAuthDelegate) TLSUsageAndConfiguration() (useTLS bool, tlsConfig *tls.Config) {
+	return true, nil
+}
+
+func (*TestMqttAuthDelegate) AuthInfo() (username string, password string) {
+	return "foo", "bar"
+}
+
+func (*TestMqttReceiverDelegate) SetReceiveChannels(_ <-chan MqttSubData,
+	_ <-chan MqttResponse,
+	_ <-chan MqttResponse) {
+	// Just ignore everything for the test
+}
+
+func (*TestMqttReceiverDelegate) OnClose() {
+}
+
+func (*TestMqttConfigDelegate) GetReceiveQueueSize() uint16 {
+	return uint16(0)
+}
+
+func (*TestMqttConfigDelegate) GetSendQueueSize() uint16 {
+	return uint16(0)
+}
+
+func (*TestMqttConfigDelegate) Subscriptions() []string {
+	return []string{"this", "and", "that"}
 }
 
 func newTestMqttDelegate() *TestMqttDelegate {
@@ -91,7 +130,8 @@ func (del *TestMqttDelegate) createContext() (context.Context, context.CancelFun
 func testConnection(ctx context.Context, t *testing.T, delegate MqttDelegate,
 	expectError bool) *MqttClient {
 
-	client := NewMqttClient(testMqttHost, testMqttPort, delegate)
+	client := NewMqttClient(testMqttHost, testMqttPort,
+		WithMqttDelegate(delegate))
 	err := client.Connect(ctx)
 	if expectError {
 		assert.NotNil(t, err, "Did not receive expected error")
@@ -106,6 +146,42 @@ func testConnection(ctx context.Context, t *testing.T, delegate MqttDelegate,
 	}
 
 	return client
+}
+
+func TestCreateMqttClient(t *testing.T) {
+	// Create all the delegate types: auth, recv, conf, and uber
+	allInOne := &TestMqttDelegate{}
+	authDel := &TestMqttAuthDelegate{}
+	recvDel := &TestMqttReceiverDelegate{}
+	confDel := &TestMqttConfigDelegate{}
+
+	t.Run("Incomplete implementations", func(t *testing.T) {
+		var client *MqttClient
+		client = NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttAuthDelegate(authDel))
+		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
+		client = NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttReceiverDelegate(recvDel))
+		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
+		client = NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttConfigDelegate(confDel))
+		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
+		client = NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttAuthDelegate(authDel),
+			WithMqttConfigDelegate(confDel))
+		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
+	})
+
+	t.Run("Good combinations", func(t *testing.T) {
+		client := NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttDelegate(allInOne))
+		assert.NotNil(t, client, "Unexpected failure in creating client")
+		client = NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttAuthDelegate(authDel),
+			WithMqttReceiverDelegate(recvDel),
+			WithMqttConfigDelegate(confDel))
+		assert.NotNil(t, client, "Unexpected failure in creating client")
+	})
 }
 
 func TestMqttClientConnection(t *testing.T) {
@@ -136,7 +212,8 @@ func TestMqttClientReconnect(t *testing.T) {
 	delegate := newTestMqttDelegate()
 
 	t.Run("Connect", func(t *testing.T) {
-		client := NewMqttClient(testMqttHost, testMqttPort, delegate)
+		client := NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
 		// Reconnect before disconnect:
@@ -147,7 +224,8 @@ func TestMqttClientReconnect(t *testing.T) {
 	})
 	t.Run("ReConnect", func(t *testing.T) {
 		// recreate the closed channels that were closed on OnClose()
-		client := NewMqttClient(testMqttHost, testMqttPort, delegate)
+		client := NewMqttClient(testMqttHost, testMqttPort,
+			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
 		err = client.Disconnect(ctx)

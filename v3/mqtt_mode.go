@@ -249,8 +249,10 @@ func (del *ModeMqttDelegate) handleKeyValueMsg(data []byte) error {
 
 // Mode extensions to the MqttClient
 // cast to the concrete delegate
-func (client *MqttClient) GetModeDelegate() (*ModeMqttDelegate, error) {
-	implDelegate, ok := client.delegate.(*ModeMqttDelegate)
+func (client *MqttClient) GetModeAuthDelegate() (*ModeMqttDelegate, error) {
+	// Since we are implementing all the delegates in one, we could cast from
+	// any of them.
+	implDelegate, ok := client.authDelegate.(*ModeMqttDelegate)
 	if !ok {
 		return implDelegate, fmt.Errorf("MqttClient was not created with Mode Delegate")
 	}
@@ -258,8 +260,9 @@ func (client *MqttClient) GetModeDelegate() (*ModeMqttDelegate, error) {
 }
 
 // Helper function to send DeviceEvent instances
-func (client *MqttClient) PublishEvent(event DeviceEvent) (uint16, error) {
-	modeDel, err := client.GetModeDelegate()
+func (client *MqttClient) PublishEvent(ctx context.Context,
+	event DeviceEvent) (uint16, error) {
+	modeDel, err := client.GetModeAuthDelegate()
 	if err != nil {
 		return 0, err
 	}
@@ -269,17 +272,16 @@ func (client *MqttClient) PublishEvent(event DeviceEvent) (uint16, error) {
 		return 0, err
 	}
 	topic := fmt.Sprintf("/devices/%d/event", modeDel.dc.DeviceID)
-	ctx, cancel := modeDel.createContext()
-	defer cancel()
 	return client.Publish(ctx, event.Qos, topic, payload)
 }
 
 // Helper function to send DeviceEvent instances. This replaces both the
 // sendBulkData and writeBulkData methods in the old API (since it does less
 // than both, covering just the intersection)
-func (client *MqttClient) PublishBulkData(bulkData DeviceBulkData) (uint16,
+func (client *MqttClient) PublishBulkData(ctx context.Context,
+	bulkData DeviceBulkData) (uint16,
 	error) {
-	modeDel, err := client.GetModeDelegate()
+	modeDel, err := client.GetModeAuthDelegate()
 	if err != nil {
 		return 0, err
 	}
@@ -287,8 +289,6 @@ func (client *MqttClient) PublishBulkData(bulkData DeviceBulkData) (uint16,
 	topic := fmt.Sprintf("/devices/%d/bulkData/%s", modeDel.dc.DeviceID,
 		bulkData.StreamID)
 
-	ctx, cancel := modeDel.createContext()
-	defer cancel()
 	return client.Publish(ctx, bulkData.Qos, topic, bulkData.Blob)
 }
 
@@ -297,9 +297,10 @@ func (client *MqttClient) PublishBulkData(bulkData DeviceBulkData) (uint16,
 // channel. There is no method of fetching single key value pairs. We only
 // update the key values.
 // XXX: Looks like there's a reload, so I must be missing something.
-func (client *MqttClient) PublishKeyValueUpdate(kvData KeyValueSync) (uint16,
+func (client *MqttClient) PublishKeyValueUpdate(ctx context.Context,
+	kvData KeyValueSync) (uint16,
 	error) {
-	modeDel, err := client.GetModeDelegate()
+	modeDel, err := client.GetModeAuthDelegate()
 	if err != nil {
 		return 0, err
 	}
@@ -311,8 +312,6 @@ func (client *MqttClient) PublishKeyValueUpdate(kvData KeyValueSync) (uint16,
 	topic := fmt.Sprintf("/devices/%d/kv", modeDel.dc.DeviceID)
 
 	// Hardcode QOS1
-	ctx, cancel := modeDel.createContext()
-	defer cancel()
 	return client.Publish(ctx, QOSAtLeastOnce, topic, payload)
 }
 
