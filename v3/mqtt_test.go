@@ -260,6 +260,7 @@ func TestMqttClientPing(t *testing.T) {
 		cmdCh <- slowdownServerCmd
 		// Wait for the ack, but it will timeout
 		err := sendPing(ctx, t, client, delegate)
+		cmdCh <- resetServerCmd
 		assert.NotNil(t, err, "Received expected error")
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
@@ -267,22 +268,48 @@ func TestMqttClientPing(t *testing.T) {
 
 	t.Run("Ping with full queue", func(t *testing.T) {
 		// Create a new delegate which has a bigger ping response buffer
-		pingQueueSize := 6
+		pingQueueSize := uint16(4)
 		queueDel := &TestMqttDelegate{
-			username:  "good",
-			password:  "anything",
-			subRecvCh: make(chan MqttSubData),
-			// in practice, this would be buffered
-			queueAckCh: make(chan MqttResponse),
-			pingAckCh:  make(chan MqttResponse, pingQueueSize),
+			username:         "good",
+			password:         "anything",
+			receiveQueueSize: pingQueueSize,
+			sendQueueSize:    2,
+			// This test takes some round trips, so don't time out too soon
+			responseTimeout: 5 * time.Second,
 		}
 		ctx, cancel := queueDel.createContext()
 		defer cancel()
 		client := testConnection(ctx, t, queueDel, false)
 		assert.NotNil(t, client, "Failed to create a client and connect")
+
+		// Loop through and ping 6 times.
+		for i := uint16(0); i < pingQueueSize; i++ {
+			logInfo("Sending ping: %d", i)
+			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
+		}
+
+		// Wait for the round trip, but don't check...
+		timer := time.NewTimer(4 * time.Second)
+		<-timer.C
+
+		extraPings := int(2 * pingQueueSize)
+		numPings := 0
+		assert.Nil(t, client.GetLastError(), "Queue Already full?")
+		var err error = nil
+		// Since this is a synchronous, keep writing
+		for err == nil && numPings < extraPings {
+			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
+			timer = time.NewTimer(100 * time.Millisecond)
+			<-timer.C
+			err = client.GetLastError()
+		}
+		assert.NotNil(t, err, "Should have hit resonse queue error")
+
+		err = client.Disconnect(ctx)
+		assert.Nil(t, err, "error disconnecting")
 	})
 
-	logInfo("Sending cancel to server")
+	logInfo("Sending shutdown to server")
 	cmdCh <- shutdownCmd
 	wg.Wait()
 }

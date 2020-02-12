@@ -70,6 +70,8 @@ type (
 		command chan<- *DeviceCommand
 		kvSync  chan<- *KeyValueSync
 
+		// Stop listening for incoming subscription data
+		stopSubCh chan bool
 		// For receiving data from the API. Input
 		SubRecvCh  <-chan MqttSubData
 		QueueAckCh <-chan MqttResponse
@@ -127,9 +129,14 @@ func (del *ModeMqttDelegate) GetDeviceContext() *DeviceContext {
 	return del.dc
 }
 
+func (del *ModeMqttDelegate) StartSubscriptionListener() {
+	del.stopSubCh = make(chan bool)
+	go del.runSubscriptionListener()
+}
+
 // Non-MqttDelegate method to listen on subscriptions and pass the interpreted
 // data to the appropriate channel (kvSync or command)
-func (del *ModeMqttDelegate) RunSubscriptionListener() {
+func (del *ModeMqttDelegate) runSubscriptionListener() {
 
 	for {
 		select {
@@ -143,6 +150,8 @@ func (del *ModeMqttDelegate) RunSubscriptionListener() {
 			} else {
 				logError("No subscription handler for %s", subData.topic)
 			}
+		case <-del.stopSubCh:
+			return
 		}
 	}
 }
@@ -186,8 +195,14 @@ func (del *ModeMqttDelegate) GetSubscriptions() []string {
 }
 
 func (del *ModeMqttDelegate) OnClose() {
+	if del.stopSubCh != nil {
+		del.stopSubCh <- true
+	}
 	close(del.command)
 	close(del.kvSync)
+	// By default, there are no listeners for the PingAckCh and QueueAckCh. If there
+	// are goroutines listening to those channels, this is where they can be signaled
+	// to stop
 }
 
 func (del *ModeMqttDelegate) createContext() (context.Context, context.CancelFunc) {

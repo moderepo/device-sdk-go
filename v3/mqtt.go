@@ -109,6 +109,9 @@ type (
 		// which will be ACK'ed. The MqttQueueResult will have the
 		// MqttPublishID and the result
 		// pingAckCh: True if our ping received an ACK or false if timeout
+		// Note: These channels will be closed when the connection is closed (from
+		// a Disconnect), so the user should stop listening to these channels when
+		// OnClose() is called..
 		SetReceiveChannels(subRecvCh <-chan MqttSubData,
 			queueAckCh <-chan MqttResponse,
 			pingAckCh <-chan MqttResponse)
@@ -139,13 +142,14 @@ type (
 	// a packet ID. This packet ID will be returned to the caller in the
 	// channel.
 	MqttClient struct {
-		mqttHost  string
-		mqttPort  int
-		delegate  MqttDelegate
-		conn      *mqttConn
-		wgSend    sync.WaitGroup // wait on sending
-		wgRecv    sync.WaitGroup // wait on receiving
-		lastError error
+		mqttHost   string
+		mqttPort   int
+		delegate   MqttDelegate
+		conn       *mqttConn
+		wgSend     sync.WaitGroup
+		sendDoneCh chan bool
+		wgRecv     sync.WaitGroup
+		lastError  error
 
 		delegateSubRecvCh chan MqttSubData
 	}
@@ -231,7 +235,7 @@ func (client *MqttClient) GetLastActivity() time.Time {
 // receive a CONNACK from the server.
 func (client *MqttClient) Connect(ctx context.Context) error {
 	if client.conn != nil {
-		return errors.New("Cannot connect when already connect")
+		return errors.New("Cannot connect when already connected")
 	}
 	client.createMqttConnection()
 	user, pwd := client.delegate.AuthInfo()
@@ -265,8 +269,6 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 func (client *MqttClient) Disconnect(ctx context.Context) error {
 	defer func() {
 		client.shutdownConnection()
-		close(client.delegateSubRecvCh)
-		client.delegate.OnClose()
 	}()
 
 	// Maybe we want to add a Connecting/Disconnecting status?
@@ -379,9 +381,6 @@ func (client *MqttClient) createMqttConnection() {
 	client.delegateSubRecvCh = subRecvCh
 	useTLS, tlsConfig := client.delegate.TLSUsageAndConfiguration()
 	sendQueueSize := client.delegate.GetSendQueueSize()
-	// XXX - we pass quit a few arguments to the connection. Maybe we should
-	// pass in the delegate instead. This allows the delegate to provide the
-	// connection to give data to dynamically
 	conn := newMqttConn(tlsConfig, client.mqttHost, client.mqttPort, useTLS,
 		queueAckCh, pingAckCh, sendQueueSize)
 
@@ -390,8 +389,9 @@ func (client *MqttClient) createMqttConnection() {
 
 	// We want to pass our WaitGroup's to the connection reader and writer, so
 	// we don't put these in the mqttConn's constructor.
+	client.sendDoneCh = make(chan bool)
 	client.wgSend.Add(1)
-	go conn.runPacketWriter(&client.wgSend)
+	go conn.runPacketWriter(&client.wgSend, client.sendDoneCh)
 	client.wgRecv.Add(1)
 	go conn.runPacketReader(&client.wgRecv)
 }
@@ -400,24 +400,30 @@ func (client *MqttClient) createMqttConnection() {
 // and avoid any panics.
 func (client *MqttClient) shutdownConnection() {
 	// We skip encapsulation of the connection class so the steps are clear
-	// 1. Close the channels to stop writing. This will break the
-	//    packetWriter goroutine out of its loop
+	// 1. Send close to the packetWriter goroutine
+	client.sendDoneCh <- true
+	// 2. Wait until the done channel has been read, since there are some queued
+	// writes that might be sent before the done channel has bene read.
+	client.wgSend.Wait()
+	// 3. Close the channels writer channels
 	close(client.conn.directSendPktCh)
 	close(client.conn.queuedSendPktCh)
-	// 2. wait for packet sender to finish
-	client.wgSend.Wait()
-	// 3. Close the connection with the server. This will break the
+	// 4. Close the connection with the server. This will break the
 	//    packet reader out of its loop. Set to disconnected here so their
 	//    reader knows that it was not an error
 	client.conn.status = DisconnectedNetworkStatus
 	client.conn.conn.Close()
-	// 4. Wait for the packet reader to finish
+	// 5. Wait for the packet reader to finish
 	client.wgRecv.Wait()
-	// 5. Close the channels for handling responses
+	// 6. Notify the client that we are disconnecting
+	client.delegate.OnClose()
+	// 6. Close the channels for handling responses
 	close(client.conn.connRespCh)
 	close(client.conn.subRespCh)
+	// 7. Close the channel to the client readers.
 	close(client.conn.queueAckCh)
 	close(client.conn.pingRespCh)
+	close(client.delegateSubRecvCh)
 	client.conn = nil
 }
 
@@ -456,6 +462,13 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket) {
 		logError("Caller could not receive publish data. SubRecCh full?")
 		client.lastError = errors.New("SubRecCh channel is full")
 	}
+}
+
+func (client *MqttClient) GetLastError() error {
+	defer func() {
+		client.lastError = nil
+	}()
+	return client.lastError
 }
 
 func (client *MqttClient) setError(err error) {
@@ -571,14 +584,14 @@ func (conn *mqttConn) sendPacket(ctx context.Context,
 	return conn.getResponseChannel(p.Type()), result.Err
 }
 
-func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup) {
+func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup, doneCh chan bool) {
 	defer func() {
 		logInfo("[MQTT] packet writer is exiting")
 		wg.Done()
 	}()
 
-	shouldLoop := true
-	for shouldLoop {
+	exitLoop := false
+	for !exitLoop {
 		// We read two channels for writing out packets. The directSend
 		// channel received synchronous, which has an unbuffered queue.
 		// The queuedSend can back up because the client already has an ID to
@@ -589,12 +602,6 @@ func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup) {
 		select {
 		case pktSendData := <-conn.directSendPktCh:
 			resultCh := pktSendData.resultCh
-			// Verify that we have the write packet type for direct sends
-			if pktSendData.pkt == nil {
-				// Case where the channel is closed
-				shouldLoop = false
-				break
-			}
 			if conn.verifyPacketType(pktSendData.pkt.Type()) != directPacketSendType {
 				resultCh <- MqttResponse{
 					Err: errors.New("Packet type must be queued"),
@@ -603,11 +610,6 @@ func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup) {
 				resultCh <- MqttResponse{Err: conn.writePacket(pktSendData.pkt)}
 			}
 		case pktSendData := <-conn.queuedSendPktCh:
-			if pktSendData.pkt == nil {
-				// Case where the channel is closed
-				shouldLoop = false
-				break
-			}
 			pktID := uint16(0)
 			if pktSendData.pkt.Type() == packet.PUBLISH {
 				pubPkt := pktSendData.pkt.(*packet.PublishPacket)
@@ -630,6 +632,8 @@ func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup) {
 					}
 				}
 			}
+		case <-doneCh:
+			exitLoop = true
 		}
 	}
 }
@@ -720,10 +724,8 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 			// packet data and send it to the appropriate channel
 			respData := conn.createResponseForPacket(p)
 			respCh := conn.getResponseChannel(p.Type())
-			logInfo("[MQTT] Received %s", p.Type())
 			select {
 			case respCh <- respData:
-				logInfo("[MQTT] Sent %s", p.Type())
 			default:
 				logError("[MQTT] Response channel is full. Dropping return packets")
 				conn.Receiver.setError(errors.New("Response channel full. Dropping packet"))

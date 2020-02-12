@@ -26,6 +26,7 @@ const (
 	publishCommandCmd
 	shutdownCmd
 	slowdownServerCmd
+	resetServerCmd
 )
 
 var (
@@ -233,6 +234,8 @@ func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
 			}
 		case slowdownServerCmd:
 			context.waitTime = 3 * time.Second
+		case resetServerCmd:
+			context.waitTime = 0
 		case shutdownCmd:
 			performShutdown(context)
 		}
