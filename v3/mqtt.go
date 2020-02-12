@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	mqttConnectTimeout = time.Second * 10
+	mqttConnectTimeout   = time.Second * 10
+	connResponseDeadline = time.Millisecond * 500
 )
 
 var mqttDialer = &net.Dialer{Timeout: mqttConnectTimeout}
@@ -125,7 +126,7 @@ type (
 		GetSendQueueSize() uint16
 
 		// Retrieve the topics for this delegate
-		GetSubscriptions() []string
+		Subscriptions() []string
 
 		// Hook so we can clean up on closing of connections
 		OnClose()
@@ -142,14 +143,14 @@ type (
 	// a packet ID. This packet ID will be returned to the caller in the
 	// channel.
 	MqttClient struct {
-		mqttHost   string
-		mqttPort   int
-		delegate   MqttDelegate
-		conn       *mqttConn
-		wgSend     sync.WaitGroup
-		sendDoneCh chan bool
-		wgRecv     sync.WaitGroup
-		lastError  error
+		mqttHost     string
+		mqttPort     int
+		delegate     MqttDelegate
+		conn         *mqttConn
+		wgSend       sync.WaitGroup
+		writerCancel context.CancelFunc
+		wgRecv       sync.WaitGroup
+		lastError    error
 
 		delegateSubRecvCh chan MqttSubData
 	}
@@ -284,15 +285,15 @@ func (client *MqttClient) Disconnect(ctx context.Context) error {
 }
 
 // Subscribe will query the delegate for its subscriptions via the
-// GetSubscriptions method. This is a synchronous call so it will block until
+// Subscriptions method. This is a synchronous call so it will block until
 // a response is received from the server. It will return a slice of errors
-// which will be in the same order as the subscriptions in GetSubscriptions().
+// which will be in the same order as the subscriptions in Subscriptions().
 func (client *MqttClient) Subscribe(ctx context.Context) []error {
 	p := packet.NewSubscribePacket()
 	p.Subscriptions = make([]packet.Subscription, 0, 10)
 	p.PacketID = client.conn.getPacketID()
 
-	subs := client.delegate.GetSubscriptions()
+	subs := client.delegate.Subscriptions()
 	for _, sub := range subs {
 		// We have no protection to keep you from subscribing to the same
 		// topic multiple times. Maybe we should? Maybe the server would send
@@ -389,9 +390,10 @@ func (client *MqttClient) createMqttConnection() {
 
 	// We want to pass our WaitGroup's to the connection reader and writer, so
 	// we don't put these in the mqttConn's constructor.
-	client.sendDoneCh = make(chan bool)
+	var ctx context.Context
+	ctx, client.writerCancel = context.WithCancel(context.Background())
 	client.wgSend.Add(1)
-	go conn.runPacketWriter(&client.wgSend, client.sendDoneCh)
+	go conn.runPacketWriter(ctx, &client.wgSend)
 	client.wgRecv.Add(1)
 	go conn.runPacketReader(&client.wgRecv)
 }
@@ -401,7 +403,7 @@ func (client *MqttClient) createMqttConnection() {
 func (client *MqttClient) shutdownConnection() {
 	// We skip encapsulation of the connection class so the steps are clear
 	// 1. Send close to the packetWriter goroutine
-	client.sendDoneCh <- true
+	client.writerCancel()
 	// 2. Wait until the done channel has been read, since there are some queued
 	// writes that might be sent before the done channel has bene read.
 	client.wgSend.Wait()
@@ -584,7 +586,7 @@ func (conn *mqttConn) sendPacket(ctx context.Context,
 	return conn.getResponseChannel(p.Type()), result.Err
 }
 
-func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup, doneCh chan bool) {
+func (conn *mqttConn) runPacketWriter(ctx context.Context, wg *sync.WaitGroup) {
 	defer func() {
 		logInfo("[MQTT] packet writer is exiting")
 		wg.Done()
@@ -632,7 +634,7 @@ func (conn *mqttConn) runPacketWriter(wg *sync.WaitGroup, doneCh chan bool) {
 					}
 				}
 			}
-		case <-doneCh:
+		case <-ctx.Done():
 			exitLoop = true
 		}
 	}
@@ -689,7 +691,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 	for {
 		// Set a deadline for reads to prevent blocking forever. We'll handle
 		// this error and continue looping, if appropriate
-		conn.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 500))
+		conn.conn.SetReadDeadline(time.Now().Add(connResponseDeadline))
 		p, err := conn.stream.Read()
 		conn.lastActivity = time.Now()
 		if err != nil {
@@ -744,11 +746,13 @@ func (conn *mqttConn) writePacket(p packet.Packet) error {
 	// lack of an ACK on write won't result in timing out. But, in any case, we
 	// will still have a response timeout on the round trip, which might be
 	// sufficient.
+	conn.conn.SetWriteDeadline(time.Now().Add(connResponseDeadline))
 	if err := conn.stream.Write(p); err != nil {
 		logError("[MQTT] failed to send %s packet: %s", p.Type(), err.Error())
 		return err
 	}
 
+	conn.conn.SetWriteDeadline(time.Now().Add(connResponseDeadline))
 	if err := conn.stream.Flush(); err != nil {
 		logError("[MQTT] failed to flush %s packet: %s", p.Type(), err.Error())
 		return err

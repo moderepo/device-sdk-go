@@ -71,7 +71,7 @@ func (del *TestMqttDelegate) GetSendQueueSize() uint16 {
 	return del.sendQueueSize
 }
 
-func (del *TestMqttDelegate) GetSubscriptions() []string {
+func (del *TestMqttDelegate) Subscriptions() []string {
 	// could do this in the initializer, but then we can't bind it to this
 	// instance of the delegate
 	del.subscriptions = []string{
@@ -223,9 +223,7 @@ func sendPing(ctx context.Context, t *testing.T, client *MqttClient,
 	select {
 	case resp := <-del.pingAckCh:
 		logInfo("sendPing received ping response")
-		if resp.Err != nil {
-			t.Errorf("Ping response returned error: %s", resp.Err)
-		}
+		return resp.Err
 	case <-ctx.Done():
 		// If we're testing timeouts, this is expected. Not always test
 		// failure
@@ -260,8 +258,8 @@ func TestMqttClientPing(t *testing.T) {
 		cmdCh <- slowdownServerCmd
 		// Wait for the ack, but it will timeout
 		err := sendPing(ctx, t, client, delegate)
-		cmdCh <- resetServerCmd
 		assert.NotNil(t, err, "Received expected error")
+		cmdCh <- resetServerCmd
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
 	})

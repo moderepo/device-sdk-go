@@ -127,7 +127,6 @@ func handleSession(context *dummyContext, conn net.Conn) {
 func getResponsePacket(pktBytes []byte, pktLen int) (pkt packet.Packet, keepConn bool) {
 	keepConn = true
 	l, ty := packet.DetectPacket(pktBytes[0:pktLen])
-	logInfo("[MQTTD] Server Received %d", ty)
 	if ty == packet.CONNECT {
 		inPkt := packet.NewConnectPacket()
 		inPkt.Decode(pktBytes[0:l])

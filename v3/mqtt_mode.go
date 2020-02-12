@@ -88,6 +88,8 @@ type (
 	}
 )
 
+var _ MqttDelegate = (*ModeMqttDelegate)(nil)
+
 func (dur ModeMqttOptDuration) apply(del *ModeMqttDelegate) {
 	del.responseTimeout = time.Duration(dur)
 }
@@ -183,7 +185,7 @@ func (del *ModeMqttDelegate) GetSendQueueSize() uint16 {
 	return del.sendQueueSize
 }
 
-func (del *ModeMqttDelegate) GetSubscriptions() []string {
+func (del *ModeMqttDelegate) Subscriptions() []string {
 	keys := make([]string, len(del.subscriptions))
 
 	i := 0
