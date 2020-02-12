@@ -1,0 +1,18 @@
+version: 2.0
+jobs:
+  go-vet-and-test:
+    docker:
+      - image: circleci/golang:1.13.3
+    working_directory: /go/src/github.com/moderepo/device-sdk-go
+    steps:
+      - checkout
+      - run:
+          name: v2
+          command: |
+            go vet ./...
+            go test ./...
+      - run:
+          name: v2
+          command: |
+            go vet ./v3/...
+            go test ./v3/...
