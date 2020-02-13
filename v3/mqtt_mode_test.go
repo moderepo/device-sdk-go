@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 var (
@@ -40,25 +42,23 @@ func newModeMqttDelegate() (*ModeMqttDelegate, chan *DeviceCommand,
 }
 
 // Helper for some tests
-func testModeConnection(t *testing.T, delegate MqttDelegate,
-	expectError bool) *MqttClient {
-	client := NewMqttClient(modeMqttHost, modeMqttPort, nil, modeUseTLS,
-		delegate)
-	err := client.Connect()
+func testModeConnection(ctx context.Context, t *testing.T,
+	delegate *ModeMqttDelegate, expectError bool) *MqttClient {
+	client := NewMqttClient(modeMqttHost, modeMqttPort,
+		WithMqttDelegate(delegate))
+	ctx, cancel := delegate.createContext()
+	defer cancel()
+	err := client.Connect(ctx)
 	if expectError {
-		if err == nil {
-			t.Errorf("Did not receive expected error")
-		}
-	} else if err != nil {
-		t.Errorf("Connect failed: %s", err)
+		assert.NotNil(t, err, "Did not receive expected error")
+	} else {
+		assert.Nil(t, err, "Connect failed")
 	}
 	isConnected := client.IsConnected()
 	if expectError {
-		if isConnected {
-			t.Errorf("IsConnected should not be true")
-		}
-	} else if !isConnected {
-		t.Errorf("IsConnected is false after connection")
+		assert.False(t, isConnected, "IsConnected should not be true")
+	} else {
+		assert.True(t, isConnected, "IsConnected is false after connection")
 	}
 
 	return client
@@ -68,18 +68,14 @@ func testModeConnection(t *testing.T, delegate MqttDelegate,
 func testModeWaitForPubAck(t *testing.T, delegate *ModeMqttDelegate,
 	expectTimeout bool) uint16 {
 	// Wait for the ack, or timeout
-	ctx, cancel := context.WithTimeout(context.Background(),
-		delegate.RequestTimeout())
+	ctx, cancel := delegate.createContext()
 	defer cancel()
 
 	// Block on the return channel or timeout
 	select {
-	case queueRes := <-delegate.QueueAckCh:
-		if queueRes.Err != nil {
-			t.Errorf("Queued request failed: %s", queueRes.Err)
-		} else {
-			return queueRes.PacketId
-		}
+	case queueResp := <-delegate.QueueAckCh:
+		assert.Nil(t, queueResp.Err, "Queued request failed")
+		return queueResp.PacketID
 	case <-ctx.Done():
 		if !expectTimeout {
 			t.Errorf("Ack response timeout: %s", ctx.Err())
@@ -95,19 +91,19 @@ func TestModeMqttClientConnection(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestModeMqttClientConnection: test bad user/pass")
 	badDelegate, _, _ := invalidModeMqttDelegate()
-	testModeConnection(t, badDelegate, true)
+	testModeConnection(ctx, t, badDelegate, true)
 
 	fmt.Println("TestModeMqttClientConnection: test good user/pass")
 	goodDelegate, _, _ := newModeMqttDelegate()
-	client := testModeConnection(t, goodDelegate, false)
+	client := testModeConnection(ctx, t, goodDelegate, false)
 
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
+	// force the cancel before the wait
 	cancel()
 	wg.Wait()
 }
@@ -116,60 +112,44 @@ func TestModeMqttClientSubscribe(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestModeMqttClientSubscribe")
 	goodDelegate, _, _ := newModeMqttDelegate()
-	client := testModeConnection(t, goodDelegate, false)
-	if err := client.Subscribe(); err != nil {
-		t.Errorf("failed to subscribe: %s", err)
-	}
+	client := testModeConnection(ctx, t, goodDelegate, false)
+	errs := client.Subscribe(ctx, goodDelegate.Subscriptions())
+	assert.Nil(t, errs, "failed to subscribe")
 
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
 	cancel()
 	wg.Wait()
 }
 
 func TestModeMqttClientPing(t *testing.T) {
 	var wg sync.WaitGroup
-	serverCtx, serverCancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(serverCtx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPing")
 	goodDelegate, _, _ := newModeMqttDelegate()
-	client := testModeConnection(t, goodDelegate, false)
-	if !client.IsConnected() {
-		t.Errorf("Lost connection")
-	}
+	client := testModeConnection(ctx, t, goodDelegate, false)
+	assert.True(t, client.IsConnected(), "Lost connection")
 
-	if err := client.Ping(); err != nil {
-		t.Errorf("Ping send failed: %s", err)
-	}
-
-	// Wait for the ack, or timeout
-	ctx, cancel := context.WithTimeout(context.Background(),
-		client.delegate.RequestTimeout())
-	defer cancel()
+	assert.Nil(t, client.Ping(ctx), "Ping send failed")
 
 	// Block on the return channel or timeout
 	select {
-	case ret := <-goodDelegate.PingAckCh:
-		// There's not really a way to return false, but, since it's bool, we'll
-		// check
-		if !ret {
-			t.Errorf("Ping response was false")
-		}
+	case resp := <-goodDelegate.PingAckCh:
+		assert.Nil(t, resp.Err, "Ping response returned error")
 	case <-ctx.Done():
 		t.Errorf("Ping response timeout: %s", ctx.Err())
 	}
 
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
-	serverCancel()
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
+	cancel()
 	wg.Wait()
 }
 
@@ -177,14 +157,12 @@ func TestModeMqttClientPublishEvent(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPublishEvent")
 	goodDelegate, _, _ := newModeMqttDelegate()
-	client := testModeConnection(t, goodDelegate, false)
-	if !client.IsConnected() {
-		t.Errorf("Lost connection")
-	}
+	client := testModeConnection(ctx, t, goodDelegate, false)
+	assert.True(t, client.IsConnected(), "Lost connection")
 
 	event := DeviceEvent{
 		EventType: "TestEvent",
@@ -192,34 +170,24 @@ func TestModeMqttClientPublishEvent(t *testing.T) {
 		Qos:       QOSAtMostOnce,
 	}
 
-	fmt.Println("Testing timeout for QOS 0")
-	var packetId uint16
-	packetId, err := client.PublishEvent(event)
-	if err != nil {
-		t.Errorf("Publish failed: %s", err)
-	}
+	var packetID uint16
+	packetID, err := client.PublishEvent(ctx, event)
+	assert.Nil(t, err, "Publish failed")
 
-	returnId := testModeWaitForPubAck(t, goodDelegate, true)
-	if returnId != 0 {
-		t.Errorf("Received an Ack for QOS 0")
-	}
+	fmt.Println("QOS 0. No ACK, so make sure we don't get one")
+	returnID := testModeWaitForPubAck(t, goodDelegate, true)
+	assert.Equal(t, returnID, uint16(0), "Received an Ack for QOS 0")
 
 	fmt.Println("Testing ACK for QOS 1")
 	event.Qos = QOSAtLeastOnce
-	if packetId, err = client.PublishEvent(event); err != nil {
-		t.Errorf("Publish failed: %s", err)
-	}
+	packetID, err = client.PublishEvent(ctx, event)
+	assert.Nil(t, err, "Publish failed")
 
-	returnId = testModeWaitForPubAck(t, goodDelegate, false)
+	returnID = testModeWaitForPubAck(t, goodDelegate, false)
+	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
 
-	if packetId != returnId {
-		t.Errorf("Send packet %d did not match Ack packet %d\n",
-			packetId, returnId)
-	}
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
 
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
 	cancel()
 	wg.Wait()
 }
@@ -230,30 +198,26 @@ func TestModeMqttClientPublishBulkData(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPublishBulkData")
 	goodDelegate, _, _ := newModeMqttDelegate()
-	client := testModeConnection(t, goodDelegate, false)
-	if !client.IsConnected() {
-		t.Errorf("Lost connection")
-	}
+	client := testModeConnection(ctx, t, goodDelegate, false)
+	assert.True(t, client.IsConnected(), "Lost connection")
 
 	bulk := DeviceBulkData{
 		StreamID: "stream1",
 		Blob:     []byte("blob"),
-		Qos:      QOSAtLeastOnce,
+		Qos:      QOSAtMostOnce,
 	}
-	_, err := client.PublishBulkData(bulk)
-	if err != nil {
-		t.Errorf("PublishDeviceBulkData send failed: %s", err)
-	}
+	_, err := client.PublishBulkData(ctx, bulk)
+	assert.Nil(t, err, "PublishDeviceBulkData send failed")
 
+	logInfo("[MQTT Test] disconnecting")
 	// From looking at the original session.go, I believe this was QOS0 (no
 	// ACK. So, once we send it, we're done
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
 	cancel()
 	wg.Wait()
 }
@@ -262,14 +226,12 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, publishNone)
+	dummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPublishKVUpdate")
 	goodDelegate, _, _ := newModeMqttDelegate()
-	client := testModeConnection(t, goodDelegate, false)
-	if !client.IsConnected() {
-		t.Errorf("Lost connection")
-	}
+	client := testModeConnection(ctx, t, goodDelegate, false)
+	assert.True(t, client.IsConnected(), "Lost connection")
 
 	kvData := KeyValueSync{
 		Action: KVSyncActionSet,
@@ -278,83 +240,64 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	}
 
 	// Set the value
-	packetId, err := client.PublishKeyValueUpdate(kvData)
-	if err != nil {
-		t.Errorf("PublishKeyValueUpdate send failed: %s", err)
-	}
+	packetID, err := client.PublishKeyValueUpdate(ctx, kvData)
+	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
 
-	returnId := testModeWaitForPubAck(t, goodDelegate, false)
-	if packetId != returnId {
-		t.Errorf("Send packet %d did not match Ack packet %d\n",
-			packetId, returnId)
-	}
+	returnID := testModeWaitForPubAck(t, goodDelegate, false)
+	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
 
 	// Reload the value
 	kvData.Action = KVSyncActionReload
 
-	packetId, err = client.PublishKeyValueUpdate(kvData)
-	if err != nil {
-		t.Errorf("PublishKeyValueUpdate send failed: %s", err)
-	}
-	returnId = testModeWaitForPubAck(t, goodDelegate, true)
+	packetID, err = client.PublishKeyValueUpdate(ctx, kvData)
+	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
 
-	if packetId != returnId {
-		t.Errorf("Send packet %d did not match Ack packet %d\n",
-			packetId, returnId)
-	}
+	returnID = testModeWaitForPubAck(t, goodDelegate, true)
+	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
 
 	// Delete the value
 	kvData.Action = KVSyncActionDelete
 
-	packetId, err = client.PublishKeyValueUpdate(kvData)
-	if err != nil {
-		t.Errorf("PublishKeyValueUpdate send failed: %s", err)
-	}
+	packetID, err = client.PublishKeyValueUpdate(ctx, kvData)
+	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
 
-	returnId = testModeWaitForPubAck(t, goodDelegate, true)
+	returnID = testModeWaitForPubAck(t, goodDelegate, true)
+	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
 
-	if packetId != returnId {
-		t.Errorf("Send packet %d did not match Ack packet %d\n",
-			packetId, returnId)
-	}
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
 
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
 	cancel()
 	wg.Wait()
 }
 
 // When we first connect and subscribe to the kv topic, we'll get a sync.
 // This is a good test to see that we're receiving.
-func TestModeMqttClientReceiveKvSync(t *testing.T) {
+func TestModeMqttClientReceiveKVSync(t *testing.T) {
 	var wg sync.WaitGroup
-	serverCtx, serverCancel := context.WithCancel(context.Background())
+	cmdCh := make(chan dummyCmd)
 	wg.Add(1)
-	dummyMQTTD(serverCtx, &wg, publishKvUpdate)
+	dummyMQTTD(nil, &wg, cmdCh)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	fmt.Println("TestModeMqttClientReceiveKvSync")
 	goodDelegate, _, kvSyncChannel := newModeMqttDelegate()
-	client := NewMqttClient(modeMqttHost, modeMqttPort, nil, modeUseTLS,
-		goodDelegate)
-	client.Connect()
-
+	client := NewMqttClient(modeMqttHost, modeMqttPort,
+		WithMqttDelegate(goodDelegate))
+	client.Connect(ctx)
+	// Tell the server to send a kv update
+	cmdCh <- publishKvCmd
 	// Start the listener
-	go goodDelegate.RunSubscriptionListener()
+	goodDelegate.StartSubscriptionListener()
 
-	if !client.IsConnected() {
-		t.Errorf("Failed to connect")
-	}
+	assert.True(t, client.IsConnected(), "Lost connection")
+	assert.Nil(t, client.Subscribe(ctx, goodDelegate.Subscriptions()),
+		"failed to subscribe")
 
-	if err := client.Subscribe(); err != nil {
-		t.Errorf("failed to subscribe: %s", err)
-	}
-
-	// 3 seconds seems to be the correct timing for this test to cause the bulk
-	// sync to be sent by the server
-	d := time.Now().Add(3 * time.Second)
-	ctx, cancel := context.WithDeadline(context.Background(), d)
-	defer cancel()
+	d := time.Now().Add(2 * time.Second)
+	syncCtx, syncCancel := context.WithDeadline(context.Background(), d)
+	defer syncCancel()
 
 	receivedSubData := false
 	select {
@@ -363,18 +306,16 @@ func TestModeMqttClientReceiveKvSync(t *testing.T) {
 		fmt.Printf("Data: %v\n", kvSync)
 		receivedSubData = true
 		break
-	case <-ctx.Done():
+	case <-syncCtx.Done():
 		t.Errorf("Timed out waiting for command")
 	}
 
-	if !receivedSubData {
-		t.Errorf("Did not receive KV Sync")
-	}
+	assert.True(t, receivedSubData, "Did not receive KV Sync")
+
 	fmt.Println("Exiting")
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
-	serverCancel()
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
+	cmdCh <- shutdownCmd
 	wg.Wait()
 }
 
@@ -382,32 +323,25 @@ func TestModeMqttClientReceiveKvSync(t *testing.T) {
 // initiate this automatically
 func TestModeMqttClientReceiveCommand(t *testing.T) {
 	var wg sync.WaitGroup
-	serverCtx, serverCancel := context.WithCancel(context.Background())
+	cmdCh := make(chan dummyCmd)
 	wg.Add(1)
-	dummyMQTTD(serverCtx, &wg, publishCommand)
+	dummyMQTTD(nil, &wg, cmdCh)
 
 	fmt.Println("TestModeMqttClientReceiveCommand")
 	goodDelegate, cmdChannel, _ := newModeMqttDelegate()
-	client := NewMqttClient(modeMqttHost, modeMqttPort, nil, modeUseTLS,
-		goodDelegate)
-	client.Connect()
-
-	// Start the listener
-	go goodDelegate.RunSubscriptionListener()
-
-	if !client.IsConnected() {
-		t.Errorf("Failed to connect")
-	}
-
-	if err := client.Subscribe(); err != nil {
-		t.Errorf("failed to subscribe: %s", err)
-	}
-
-	// 3 seconds seems to be the correct timing for this test to cause the bulk
-	// sync to be sent by the server
-	d := time.Now().Add(10 * time.Second)
-	ctx, cancel := context.WithDeadline(context.Background(), d)
+	client := NewMqttClient(modeMqttHost, modeMqttPort,
+		WithMqttDelegate(goodDelegate))
+	ctx, cancel := goodDelegate.createContext()
 	defer cancel()
+	client.Connect(ctx)
+
+	cmdCh <- publishCommandCmd
+	// Start the listener
+	goodDelegate.StartSubscriptionListener()
+
+	assert.True(t, client.IsConnected(), "Lost connection")
+	assert.Nil(t, client.Subscribe(ctx, goodDelegate.Subscriptions()),
+		"failed to subscribe")
 
 	receivedSubData := false
 	select {
@@ -419,13 +353,11 @@ func TestModeMqttClientReceiveCommand(t *testing.T) {
 		t.Errorf("Timed out waiting for command")
 	}
 
-	if !receivedSubData {
-		t.Errorf("Did not receive command")
-	}
+	assert.True(t, receivedSubData, "Did not receive command")
+
 	fmt.Println("Exiting")
-	if client.Disconnect() != nil {
-		t.Errorf("error disconnecting")
-	}
-	serverCancel()
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
+	cmdCh <- shutdownCmd
 	wg.Wait()
 }

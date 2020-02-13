@@ -3,6 +3,7 @@ package mode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,23 +13,37 @@ import (
 	packet "github.com/moderepo/device-sdk-go/v3/mqtt_packet"
 )
 
-// Not really for export, but
 type publishMode int
+type dummyCmd int
 
 const (
 	publishKvUpdate publishMode = iota
 	publishCommand
-	publishNone
+
+	// publishes a kv sync
+	publishKvCmd dummyCmd = iota
+	// publishes a command
+	publishCommandCmd
+	shutdownCmd
+	slowdownServerCmd
+	resetServerCmd
 )
 
 var (
-	testMqttHost               = "localhost"
-	testMqttPort               = 1998
-	useTLS                     = false
-	requestTimeout             = 2 * time.Second
-	_pubMode       publishMode = publishNone
-	currentDevice              = ""
+	testMqttHost   = "localhost"
+	testMqttPort   = 1998
+	useTLS         = false
+	requestTimeout = 2 * time.Second
+	currentDevice  = ""
 )
+
+type dummyContext struct {
+	ctx      context.Context
+	cmdCh    chan dummyCmd
+	listener net.Listener
+	conns    []net.Conn
+	waitTime time.Duration
+}
 
 func doConnect(connPkt *packet.ConnectPacket) (*packet.ConnackPacket, bool) {
 	ackPack := packet.NewConnackPacket()
@@ -61,66 +76,88 @@ func writePacket(conn net.Conn, pkt packet.Packet, bigPacket bool) error {
 	return nil
 }
 
-func readStream(conn net.Conn) bool {
-	keepConn := true
-	for keepConn {
-		tmp := make([]byte, 256)
-		n, err := conn.Read(tmp)
-		if err != nil {
-			if err != io.EOF {
-				logError("[MQTTD] Error reading packet from client: %s", err)
-			}
-			break
+func readPacket(conn net.Conn) (numBytes int, bytesRead []byte, err error) {
+	tmp := make([]byte, 256)
+	numBytes, err = conn.Read(tmp)
+	if err != nil {
+		if err == io.EOF {
+			// EOF means client closed the connection. We treat this as a
+			// normal operation.
+			return numBytes, tmp[0:1], nil
 		}
-		l, ty := packet.DetectPacket(tmp[0:n])
-		var pkt packet.Packet
-		if ty == packet.CONNECT {
-			inPkt := packet.NewConnectPacket()
-			inPkt.Decode(tmp[0:l])
-			pkt, keepConn = doConnect(inPkt)
-		} else if ty == packet.SUBSCRIBE {
-			pkt = &packet.SubackPacket{PacketID: 1, ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
-		} else if ty == packet.PINGREQ {
-			pkt = packet.NewPingrespPacket()
-		} else if ty == packet.DISCONNECT {
-			// Let the caller close
-			return false
-		} else if ty == packet.PUBLISH {
-			inPkt := packet.NewPublishPacket()
-			inPkt.Decode(tmp[0:l])
-			// If it's QOS 1, create an ack packet.
-			if inPkt.Message.QOS == packet.QOSAtLeastOnce {
-				pubAck := packet.NewPubackPacket()
-				pubAck.PacketID = inPkt.PacketID
-				pkt = pubAck
-			} else {
-				continue
-			}
-		} else {
-			logInfo("[MQTTD] Unhandled data from client: %s (%s)", l, ty)
-			continue
-		}
-
-		if err := writePacket(conn, pkt, false); err != nil {
-			logError("[MQTTD] Error writing packet to client: %s", err)
-			break
-		}
+		logError("[MQTTD] Error reading packet from client: %s", err)
+		return 0, nil, err
 	}
-	return false
+	return numBytes, tmp, nil
 }
 
-func handleSession(conn net.Conn) {
-	// Read until
-	if readStream(conn) {
-		return
+func handleSession(context *dummyContext, conn net.Conn) {
+	keepConn := true
+
+	for keepConn {
+		// Read until command says quit or we get a disconnect
+		bytesRead, packetBytes, err := readPacket(conn)
+		if context.waitTime > 0 {
+			logInfo("[MQTTD] Pausing server...")
+			timer := time.NewTimer(context.waitTime)
+			<-timer.C
+			logInfo("[MQTTD] Unpausing server...")
+		}
+
+		if err != nil {
+			logError("[MQTTD] Error reading packet from stream: %s", err)
+			keepConn = false
+			// we can't continue without a packet from the client
+			break
+		}
+		var respPkt packet.Packet
+		respPkt, keepConn = getResponsePacket(packetBytes, bytesRead)
+		if respPkt != nil {
+			if err := writePacket(conn, respPkt, false); err != nil {
+				logError("[MQTTD] Error writing packet to client: %s", err)
+				// write error is likely a missing client, so we end the connection
+				keepConn = false
+			}
+		}
 	}
+	logInfo("[MQTTD] closing connection")
 	conn.Close()
 }
 
-func handlePublish(conn net.Conn) {
+func getResponsePacket(pktBytes []byte, pktLen int) (pkt packet.Packet, keepConn bool) {
+	keepConn = true
+	l, ty := packet.DetectPacket(pktBytes[0:pktLen])
+	if ty == packet.CONNECT {
+		inPkt := packet.NewConnectPacket()
+		inPkt.Decode(pktBytes[0:l])
+		pkt, keepConn = doConnect(inPkt)
+	} else if ty == packet.SUBSCRIBE {
+		pkt = &packet.SubackPacket{PacketID: 1, ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
+	} else if ty == packet.PINGREQ {
+		pkt = packet.NewPingrespPacket()
+	} else if ty == packet.DISCONNECT {
+		pkt = nil
+		keepConn = false
+	} else if ty == packet.PUBLISH {
+		inPkt := packet.NewPublishPacket()
+		inPkt.Decode(pktBytes[0:l])
+		// If it's QOS 1, create an ack packet.
+		if inPkt.Message.QOS == packet.QOSAtLeastOnce {
+			pubAck := packet.NewPubackPacket()
+			pubAck.PacketID = inPkt.PacketID
+			pkt = pubAck
+		} else {
+			pkt = nil
+		}
+	}
+
+	return pkt, keepConn
+}
+
+func sendPublish(conn net.Conn, pubMode publishMode) {
 	var pkt packet.Packet
 
-	switch _pubMode {
+	switch pubMode {
 	case publishKvUpdate:
 		kvData := KeyValueSync{
 			Action:   KVSyncActionReload,
@@ -158,12 +195,10 @@ func handlePublish(conn net.Conn) {
 		cmdPkt.Message = m
 		cmdPkt.PacketID = 2
 		pkt = cmdPkt
-	case publishNone:
-		// just return
 	}
 
 	if pkt != nil {
-		timer := time.NewTimer(2 * time.Second)
+		timer := time.NewTimer(1 * time.Second)
 		<-timer.C
 
 		if err := writePacket(conn, pkt, true); err != nil {
@@ -172,38 +207,92 @@ func handlePublish(conn net.Conn) {
 	}
 }
 
-func startAccepting(listener net.Listener) {
+func runServer(wg *sync.WaitGroup, context *dummyContext, listener net.Listener) {
+	defer wg.Done()
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			continue
+			break
 		}
-		go handleSession(conn)
-		go handlePublish(conn)
+		context.conns = append(context.conns, conn)
+		go handleSession(context, conn)
 	}
 }
 
-func startServing(ctx context.Context, wg *sync.WaitGroup, readyCh chan struct{}) {
+func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
+	defer wg.Done()
+	for cmd := range context.cmdCh {
+		switch cmd {
+		case publishKvCmd:
+			for _, conn := range context.conns {
+				go sendPublish(conn, publishKvUpdate)
+			}
+		case publishCommandCmd:
+			for _, conn := range context.conns {
+				go sendPublish(conn, publishCommand)
+			}
+		case slowdownServerCmd:
+			context.waitTime = 3 * time.Second
+		case resetServerCmd:
+			context.waitTime = 0
+		case shutdownCmd:
+			performShutdown(context)
+		}
+	}
+}
+
+func runWaitForCancel(wg *sync.WaitGroup, context *dummyContext) {
+	defer wg.Done()
+	<-context.ctx.Done()
+	performShutdown(context)
+}
+
+func performShutdown(context *dummyContext) {
+	// Tells the server to not accept new connections
+	context.listener.Close()
+	// Close the current connection
+	for _, conn := range context.conns {
+		conn.Close()
+	}
+	if context.cmdCh != nil {
+		// close the command channel so it doesn't listen to any more commands
+		close(context.cmdCh)
+	}
+}
+
+// Dummy MQTT server. It will run an MQTT server as a goroutine. An optional
+// command channel can be passed in to manipulate the server manipulating test
+// conditions and shutting down.
+// Unlike the v2 dummyMQTTD, this starts goroutines but isn't meant to be run as
+// a goroutine. It will panic if it is unable to start listening.
+//
+// To end the server, either close the command channel or call cancel() on the
+// context.
+func dummyMQTTD(ctx context.Context, wg *sync.WaitGroup,
+	cmdCh chan dummyCmd) bool {
 	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", testMqttHost, testMqttPort))
 	if err != nil {
 		panic(err)
 	}
 
-	go startAccepting(l)
-	close(readyCh)
-	<-ctx.Done()
-	logInfo("[MQTTD] Shutting down server")
-	l.Close()
-	wg.Done()
-}
+	context := dummyContext{
+		ctx:      ctx,
+		cmdCh:    cmdCh,
+		listener: l,
+		waitTime: 0,
+	}
 
-// Dummy server, with a context that will shut us down
-// modeMode means run as a Mode MQTT Server, not a generic one
-func dummyMQTTD(ctx context.Context, wg *sync.WaitGroup, mode publishMode) {
-	_pubMode = mode
-	readyCh := make(chan struct{})
+	if cmdCh != nil && ctx != nil {
+		panic(errors.New("dummy server cannot run with context.Context *and* a command channel"))
+	}
+	if cmdCh != nil {
+		go runCommandHandler(wg, &context)
+	} else {
+		// No command channel, so wait for the context to shut us down
+		go runWaitForCancel(wg, &context)
+	}
+	wg.Add(1)
+	go runServer(wg, &context, l)
 
-	go startServing(ctx, wg, readyCh)
-	// Wait to return until we've started the server
-	<-readyCh
+	return true
 }
