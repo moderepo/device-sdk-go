@@ -117,7 +117,7 @@ func TestModeMqttClientSubscribe(t *testing.T) {
 	fmt.Println("TestModeMqttClientSubscribe")
 	goodDelegate, _, _ := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
-	errs := client.Subscribe(ctx)
+	errs := client.Subscribe(ctx, goodDelegate.Subscriptions())
 	assert.Nil(t, errs, "failed to subscribe")
 
 	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
@@ -292,7 +292,8 @@ func TestModeMqttClientReceiveKVSync(t *testing.T) {
 	goodDelegate.StartSubscriptionListener()
 
 	assert.True(t, client.IsConnected(), "Lost connection")
-	assert.Nil(t, client.Subscribe(ctx), "failed to subscribe")
+	assert.Nil(t, client.Subscribe(ctx, goodDelegate.Subscriptions()),
+		"failed to subscribe")
 
 	d := time.Now().Add(2 * time.Second)
 	syncCtx, syncCancel := context.WithDeadline(context.Background(), d)
@@ -339,7 +340,8 @@ func TestModeMqttClientReceiveCommand(t *testing.T) {
 	goodDelegate.StartSubscriptionListener()
 
 	assert.True(t, client.IsConnected(), "Lost connection")
-	assert.Nil(t, client.Subscribe(ctx), "failed to subscribe")
+	assert.Nil(t, client.Subscribe(ctx, goodDelegate.Subscriptions()),
+		"failed to subscribe")
 
 	receivedSubData := false
 	select {

@@ -128,9 +128,6 @@ type (
 		// Buffer size of the outgoing queue to the server. This cannot be
 		// changed after a connection is created
 		GetSendQueueSize() uint16
-
-		// Retrieve the topics for this delegate
-		Subscriptions() []string
 	}
 
 	// MqttDelegate is the combined required interfaces that must be implemented
@@ -160,7 +157,7 @@ type (
 		confDelegate MqttConfigDelegate
 		conn         *mqttConn
 		wgSend       sync.WaitGroup
-		writerCancel context.CancelFunc
+		stopWriterCh chan struct{}
 		wgRecv       sync.WaitGroup
 		lastError    error
 
@@ -335,12 +332,12 @@ func (client *MqttClient) Disconnect(ctx context.Context) error {
 // Subscriptions method. This is a synchronous call so it will block until
 // a response is received from the server. It will return a slice of errors
 // which will be in the same order as the subscriptions in Subscriptions().
-func (client *MqttClient) Subscribe(ctx context.Context) []error {
+func (client *MqttClient) Subscribe(ctx context.Context,
+	subs []string) []error {
 	p := packet.NewSubscribePacket()
 	p.Subscriptions = make([]packet.Subscription, 0, 10)
 	p.PacketID = client.conn.getPacketID()
 
-	subs := client.confDelegate.Subscriptions()
 	for _, sub := range subs {
 		// We have no protection to keep you from subscribing to the same
 		// topic multiple times. Maybe we should? Maybe the server would send
@@ -437,10 +434,9 @@ func (client *MqttClient) createMqttConnection() {
 
 	// We want to pass our WaitGroup's to the connection reader and writer, so
 	// we don't put these in the mqttConn's constructor.
-	var ctx context.Context
-	ctx, client.writerCancel = context.WithCancel(context.Background())
+	client.stopWriterCh = make(chan struct{})
 	client.wgSend.Add(1)
-	go conn.runPacketWriter(ctx, &client.wgSend)
+	go conn.runPacketWriter(client.stopWriterCh, &client.wgSend)
 	client.wgRecv.Add(1)
 	go conn.runPacketReader(&client.wgRecv)
 }
@@ -450,7 +446,7 @@ func (client *MqttClient) createMqttConnection() {
 func (client *MqttClient) shutdownConnection() {
 	// We skip encapsulation of the connection class so the steps are clear
 	// 1. Send close to the packetWriter goroutine
-	client.writerCancel()
+	client.stopWriterCh <- struct{}{}
 	// 2. Wait until the done channel has been read, since there are some queued
 	// writes that might be sent before the done channel has bene read.
 	client.wgSend.Wait()
@@ -633,7 +629,8 @@ func (conn *mqttConn) sendPacket(ctx context.Context,
 	return conn.getResponseChannel(p.Type()), result.Err
 }
 
-func (conn *mqttConn) runPacketWriter(ctx context.Context, wg *sync.WaitGroup) {
+func (conn *mqttConn) runPacketWriter(stopWriterCh chan struct{},
+	wg *sync.WaitGroup) {
 	defer func() {
 		logInfo("[MQTT] packet writer is exiting")
 		wg.Done()
@@ -681,7 +678,7 @@ func (conn *mqttConn) runPacketWriter(ctx context.Context, wg *sync.WaitGroup) {
 					}
 				}
 			}
-		case <-ctx.Done():
+		case <-stopWriterCh:
 			exitLoop = true
 		}
 	}

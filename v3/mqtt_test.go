@@ -59,10 +59,6 @@ func (*TestMqttConfigDelegate) GetSendQueueSize() uint16 {
 	return uint16(0)
 }
 
-func (*TestMqttConfigDelegate) Subscriptions() []string {
-	return []string{"this", "and", "that"}
-}
-
 func newTestMqttDelegate() *TestMqttDelegate {
 	d := &TestMqttDelegate{
 		username:         "good",
@@ -70,6 +66,10 @@ func newTestMqttDelegate() *TestMqttDelegate {
 		receiveQueueSize: 2,
 		sendQueueSize:    2,
 		responseTimeout:  2 * time.Second,
+		subscriptions: []string{
+			fmt.Sprintf("/devices/%s/command", "foo"),
+			fmt.Sprintf("/devices/%s/kv", "bar"),
+		},
 	}
 
 	return d
@@ -108,16 +108,6 @@ func (del *TestMqttDelegate) GetReceiveQueueSize() uint16 {
 
 func (del *TestMqttDelegate) GetSendQueueSize() uint16 {
 	return del.sendQueueSize
-}
-
-func (del *TestMqttDelegate) Subscriptions() []string {
-	// could do this in the initializer, but then we can't bind it to this
-	// instance of the delegate
-	del.subscriptions = []string{
-		fmt.Sprintf("/devices/%s/command", del.username),
-		fmt.Sprintf("/devices/%s/kv", del.username),
-	}
-	return del.subscriptions
 }
 
 func (del *TestMqttDelegate) OnClose() {
@@ -244,7 +234,7 @@ func TestMqttClientSubscribe(t *testing.T) {
 	fmt.Println("TestMqttClientSubscribe")
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(ctx, t, goodDelegate, false)
-	if errs := client.Subscribe(ctx); errs != nil {
+	if errs := client.Subscribe(ctx, goodDelegate.subscriptions); errs != nil {
 		t.Errorf("failed to subscribe: %s", errs)
 	}
 
