@@ -3,7 +3,6 @@ jobs:
   go-vet-and-test:
     docker:
       - image: circleci/golang:1.13.3
-    working_directory: /go/src/github.com/moderepo/device-sdk-go
     steps:
       - checkout
       - run:

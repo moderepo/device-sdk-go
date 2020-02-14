@@ -297,8 +297,6 @@ func sendPing(ctx context.Context, t *testing.T, client *MqttClient,
 		// failure
 		return fmt.Errorf("Timed out waiting for ping response")
 	}
-
-	return nil
 }
 
 func TestMqttClientPing(t *testing.T) {
@@ -328,8 +326,7 @@ func TestMqttClientPing(t *testing.T) {
 		err := sendPing(ctx, t, client, delegate)
 		assert.NotNil(t, err, "Received expected error")
 		cmdCh <- resetServerCmd
-		err = client.Disconnect(ctx)
-		assert.Nil(t, err, "error disconnecting")
+		client.Disconnect(ctx)
 	})
 
 	t.Run("Ping with full queue", func(t *testing.T) {
