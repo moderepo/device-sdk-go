@@ -70,8 +70,9 @@ type (
 	// MqttSubData to send in the channel to the client when we receive data
 	// published for our subscription.
 	MqttSubData struct {
-		topic string
-		data  []byte
+		Topic       string
+		Data        []byte
+		ReceiveTime time.Time
 	}
 
 	// MqttResponse is result of an MQTT Request. Not all of these members will
@@ -130,6 +131,17 @@ type (
 		GetSendQueueSize() uint16
 	}
 
+	// MqttErrorDelegate is an optional delegate which allows the MqttClient
+	// a method of signaling errors that are not able to be communicated
+	// through the normal channels. See handling errors in the documentation.
+	MqttErrorDelegate interface {
+		// The buffer size of the error channel
+		GetErrorChannelSize() uint16
+
+		// Provides the delegate the channel to receive errors
+		SetErrorChannel(errCh chan error)
+	}
+
 	// MqttDelegate is the combined required interfaces that must be implemented
 	// to use the MqttClient. This is a convenience that the user can use to
 	// allow a single struct to implement all the required interfaces
@@ -150,16 +162,17 @@ type (
 	// a packet ID. This packet ID will be returned to the caller in the
 	// channel.
 	MqttClient struct {
-		mqttHost     string
-		mqttPort     int
-		authDelegate MqttAuthDelegate
-		recvDelegate MqttReceiverDelegate
-		confDelegate MqttConfigDelegate
-		conn         *mqttConn
-		wgSend       sync.WaitGroup
-		stopWriterCh chan struct{}
-		wgRecv       sync.WaitGroup
-		lastError    error
+		mqttHost      string
+		mqttPort      int
+		authDelegate  MqttAuthDelegate
+		recvDelegate  MqttReceiverDelegate
+		confDelegate  MqttConfigDelegate
+		errorDelegate MqttErrorDelegate
+		conn          *mqttConn
+		wgSend        sync.WaitGroup
+		stopWriterCh  chan struct{}
+		wgRecv        sync.WaitGroup
+		lastErrors    []error
 
 		delegateSubRecvCh chan MqttSubData
 	}
@@ -167,9 +180,9 @@ type (
 	// Delegate for the mqqtConn to call back to the MqttClient
 	mqttReceiver interface {
 		// Called by the connection when receiving publishes
-		handlePubReceive(*packet.PublishPacket)
+		handlePubReceive(pkt *packet.PublishPacket, receiveTime time.Time)
 		// Called by the connection when there is an error
-		setError(error)
+		appendError(error)
 	}
 
 	packetSendData struct {
@@ -212,6 +225,8 @@ type (
 		subRespCh  chan MqttResponse
 		pingRespCh chan MqttResponse
 		queueAckCh chan MqttResponse
+		// This is optional and may be nil
+		errCh chan error
 
 		mutex sync.Mutex
 	}
@@ -235,6 +250,12 @@ func WithMqttConfigDelegate(confDelegate MqttConfigDelegate) func(*MqttClient) {
 	}
 }
 
+func WithMqttErrorDelegate(errorDelegate MqttErrorDelegate) func(*MqttClient) {
+	return func(c *MqttClient) {
+		c.errorDelegate = errorDelegate
+	}
+}
+
 func WithMqttDelegate(delegate MqttDelegate) func(*MqttClient) {
 	return func(c *MqttClient) {
 		c.authDelegate = delegate
@@ -248,8 +269,9 @@ func WithMqttDelegate(delegate MqttDelegate) func(*MqttClient) {
 func NewMqttClient(mqttHost string, mqttPort int,
 	dels ...func(*MqttClient)) *MqttClient {
 	client := &MqttClient{
-		mqttHost: mqttHost,
-		mqttPort: mqttPort,
+		mqttHost:   mqttHost,
+		mqttPort:   mqttPort,
+		lastErrors: make([]error, 0, 5),
 	}
 
 	for _, del := range dels {
@@ -267,7 +289,7 @@ func NewMqttClient(mqttHost string, mqttPort int,
 // IsConnected will return true if we have a successfully CONNACK'ed response.
 //
 func (client *MqttClient) IsConnected() bool {
-	return client.conn.status == ConnectedNetworkStatus
+	return client.conn != nil && client.conn.status == ConnectedNetworkStatus
 }
 
 // GetLastActivity will return the time since the last send or
@@ -312,6 +334,11 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 // the server closes the connection.
 // Note: We might want to wait, but order is important here.
 func (client *MqttClient) Disconnect(ctx context.Context) error {
+	if client.conn == nil {
+		// nothing to disconnect. Return
+		return nil
+	}
+
 	defer func() {
 		client.shutdownConnection()
 	}()
@@ -367,8 +394,7 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 
 // Ping sends an MQTT PINGREQ event to the server. This is an asynchronous
 // call, so we will always return success if we were able to queue the message
-// for delivery. Any subsequent results will be sent on the delegate's
-// pingAckCh.
+// for delivery. Results will be sent on the delegate's pingAckCh
 func (client *MqttClient) Ping(ctx context.Context) error {
 
 	p := packet.NewPingreqPacket()
@@ -379,6 +405,24 @@ func (client *MqttClient) Ping(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// PingAndWait sends an MQTT PINGREQ event to the server and waits for the
+// response. If this method is used instead of the asynchronous Ping, user
+// should not be listening on the pingAckCh channel since this function may
+// timeout waiting for the response an error will be returned.
+func (client *MqttClient) PingAndWait(ctx context.Context) error {
+
+	p := packet.NewPingreqPacket()
+	respChan, err := client.conn.sendPacket(ctx, p)
+	if err != nil {
+		logError("[MQTT] failed to send packet: %s", err.Error())
+		return err
+	}
+
+	client.wgRecv.Add(1)
+	resp := client.receivePacket(ctx, respChan)
+	return resp.Err
 }
 
 // Publish sends an MQTT Publish event to subscribers on the specified
@@ -429,6 +473,12 @@ func (client *MqttClient) createMqttConnection() {
 	conn := newMqttConn(tlsConfig, client.mqttHost, client.mqttPort, useTLS,
 		queueAckCh, pingAckCh, sendQueueSize)
 
+	if client.errorDelegate != nil {
+		errCh := make(chan error, client.errorDelegate.GetErrorChannelSize())
+		client.errorDelegate.SetErrorChannel(errCh)
+		conn.errCh = errCh
+	}
+
 	client.conn = conn
 	conn.Receiver = client
 
@@ -469,6 +519,9 @@ func (client *MqttClient) shutdownConnection() {
 	close(client.conn.queueAckCh)
 	close(client.conn.pingRespCh)
 	close(client.delegateSubRecvCh)
+	if client.conn.errCh != nil {
+		close(client.conn.errCh)
+	}
 	client.conn = nil
 }
 
@@ -496,28 +549,51 @@ func (client *MqttClient) receivePacket(ctx context.Context,
 // Implementation of the delegate for mqttConn to handle publish from the
 // server on topics that we've subscribed to. We only unpack it and send it
 // to the caller
-func (client *MqttClient) handlePubReceive(p *packet.PublishPacket) {
+func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
+	receiveTime time.Time) {
 	logInfo("[MQTT] received message for topic %s", p.Message.Topic)
 
-	pubData := MqttSubData{p.Message.Topic, p.Message.Payload}
+	pubData := MqttSubData{
+		Topic:       p.Message.Topic,
+		Data:        p.Message.Payload,
+		ReceiveTime: receiveTime,
+	}
 
+	// If we have successfully queued the pub to the user
 	select {
 	case client.delegateSubRecvCh <- pubData:
 	default:
 		logError("Caller could not receive publish data. SubRecCh full?")
-		client.lastError = errors.New("SubRecCh channel is full")
+		client.conn.sendQueueingError(nil)
+		return
+	}
+	if p.Message.QOS != packet.QOSAtMostOnce {
+		ackPkt := packet.NewPubackPacket()
+		ackPkt.PacketID = p.PacketID
+		// For everything except QOS2: if we have queued the message to the
+		// user, we consider that successfully published to us, so we attempt
+		// to send an ACK back to the server.
+		ctx, cancel := context.WithTimeout(context.Background(),
+			connResponseDeadline)
+		defer cancel()
+		if _, err := client.conn.queuePacket(ctx, ackPkt); err != nil {
+			client.conn.sendQueueingError(err)
+		}
 	}
 }
 
-func (client *MqttClient) GetLastError() error {
+// Returns the last errors, and then resets the errors. If there is no
+// error delegate or the error delegate's error channel is full, we "queue"
+// errors in a slice that can be fetched.
+func (client *MqttClient) TakeRemainingErrors() []error {
 	defer func() {
-		client.lastError = nil
+		client.lastErrors = make([]error, 0, 5)
 	}()
-	return client.lastError
+	return client.lastErrors
 }
 
-func (client *MqttClient) setError(err error) {
-	client.lastError = err
+func (client *MqttClient) appendError(err error) {
+	client.lastErrors = append(client.lastErrors, err)
 }
 
 func newMqttConn(tlsConfig *tls.Config, mqttHost string,
@@ -529,14 +605,12 @@ func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 	var err error
 	if useTLS {
 		if conn, err = tls.DialWithDialer(mqttDialer, "tcp", addr,
-			tlsConfig); err == nil {
-		} else {
+			tlsConfig); err != nil {
 			logError("MQTT TLS dialer failed: %s", err.Error())
 			return nil
 		}
 	} else {
-		if conn, err = mqttDialer.Dial("tcp", addr); err == nil {
-		} else {
+		if conn, err = mqttDialer.Dial("tcp", addr); err != nil {
 			logError("MQTT dialer failed: %s", err.Error())
 			return nil
 		}
@@ -648,34 +722,27 @@ func (conn *mqttConn) runPacketWriter(stopWriterCh chan struct{},
 		select {
 		case pktSendData := <-conn.directSendPktCh:
 			resultCh := pktSendData.resultCh
-			if conn.verifyPacketType(pktSendData.pkt.Type()) != directPacketSendType {
-				resultCh <- MqttResponse{
-					Err: errors.New("Packet type must be queued"),
-				}
-			} else {
-				resultCh <- MqttResponse{Err: conn.writePacket(pktSendData.pkt)}
-			}
+			resultCh <- MqttResponse{Err: conn.writePacket(pktSendData.pkt)}
 		case pktSendData := <-conn.queuedSendPktCh:
 			pktID := uint16(0)
 			if pktSendData.pkt.Type() == packet.PUBLISH {
 				pubPkt := pktSendData.pkt.(*packet.PublishPacket)
 				pktID = pubPkt.PacketID
 			}
-			// Get the packet ID, if any, for errors
+			// Get the packet ID, if any, for errors. This is a long lived channel, so
+			// it's possible to be full.
 			resultCh := pktSendData.resultCh
-			if conn.verifyPacketType(pktSendData.pkt.Type()) != queuedPacketSendType {
-				resultCh <- MqttResponse{
-					Err: errors.New("Packet type must be sent directly"),
-				}
-			} else {
-				err := conn.writePacket(pktSendData.pkt)
-				if err != nil {
-					// If there was an error sending, we can notify the caller
-					// immediately.
-					resultCh <- MqttResponse{
-						PacketID: pktID,
-						Err:      err,
-					}
+			err := conn.writePacket(pktSendData.pkt)
+			if err != nil {
+				// If there was an error sending, we can notify the caller
+				// immediately.
+				select {
+				case resultCh <- MqttResponse{
+					PacketID: pktID,
+					Err:      err,
+				}:
+				default:
+					conn.sendQueueingError(err)
 				}
 			}
 		case <-stopWriterCh:
@@ -714,7 +781,7 @@ func (conn *mqttConn) createResponseForPacket(p packet.Packet) MqttResponse {
 				err := errors.New("subscription rejected")
 				if i == 0 {
 					// If someone just checks Err of the response, at least
-					// they'll know that there was a failur
+					// they'll know that there was a failure
 					resp.Errs = append(resp.Errs, err)
 				}
 			}
@@ -737,13 +804,13 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 		// this error and continue looping, if appropriate
 		conn.conn.SetReadDeadline(time.Now().Add(connResponseDeadline))
 		p, err := conn.stream.Read()
-		conn.lastActivity = time.Now()
 		if err != nil {
 			// Disconnect "responses" are EOF
 			if err == io.EOF || conn.status == DisconnectedNetworkStatus {
 				// Server disconnected. This happens for 2 reasons:
 				// 1. We initiated a disconnect
 				// 2. we don't ping, so the server assumed we're done
+				conn.status = DisconnectedNetworkStatus
 				logInfo("[MQTT] net.Conn disconnected: %s", err.Error())
 			} else {
 				// I/O Errors usually return this, so if it is, we can
@@ -761,10 +828,13 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 			// exiting of this function (and wg.Done())
 			break
 		}
+		// Wait until here to set last activity, since disconnects and timeouts
+		// should be included as activity.
+		conn.lastActivity = time.Now()
 		if p.Type() == packet.PUBLISH {
 			// Incoming publish, received from our subscription.
 			pubPkt := p.(*packet.PublishPacket)
-			conn.Receiver.handlePubReceive(pubPkt)
+			conn.Receiver.handlePubReceive(pubPkt, time.Now())
 		} else {
 			// Everything besides publish and disconnect, so unpackage the
 			// packet data and send it to the appropriate channel
@@ -773,8 +843,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 			select {
 			case respCh <- respData:
 			default:
-				logError("[MQTT] Response channel is full. Dropping return packets")
-				conn.Receiver.setError(errors.New("Response channel full. Dropping packet"))
+				conn.sendQueueingError(nil)
 			}
 		}
 	}
@@ -828,7 +897,6 @@ func (conn *mqttConn) verifyPacketType(pktType packet.Type) packetSendType {
 	case packet.PUBLISH, packet.PUBACK, packet.PINGREQ, packet.PINGRESP:
 		return queuedPacketSendType
 	default:
-		//
 		logError("[MQTT] Unhandled packet type: %s", pktType)
 		return unhandledPacketSendType
 	}
@@ -849,6 +917,25 @@ func (conn *mqttConn) getResponseChannel(pktType packet.Type) chan MqttResponse 
 	default:
 		logError("[MQTT] Unhandled packet type: %s", pktType)
 		return nil
+	}
+}
+
+func (conn *mqttConn) sendQueueingError(err error) {
+	if err == nil {
+		err = errors.New("Channel full. Sending on error channel")
+	}
+	if conn.errCh != nil {
+		select {
+		case conn.errCh <- err:
+			logInfo("Error Queued to delegate %d/%d", len(conn.errCh),
+				cap(conn.errCh))
+		default:
+			logInfo("Error delegate channel full. Check TakeRemainingErrors")
+			conn.Receiver.appendError(err)
+		}
+	} else {
+		logInfo("No Error delegate channel. Check TakeRemainingErrors")
+		conn.Receiver.appendError(err)
 	}
 }
 

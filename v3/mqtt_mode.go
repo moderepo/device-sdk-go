@@ -143,14 +143,14 @@ func (del *ModeMqttDelegate) runSubscriptionListener() {
 	for {
 		select {
 		case subData := <-del.SubRecvCh:
-			subBytes := subData.data
+			subBytes := subData.Data
 			// Determine which callback to call based on the topic
-			if handler, exists := del.subscriptions[subData.topic]; exists {
+			if handler, exists := del.subscriptions[subData.Topic]; exists {
 				if err := handler(subBytes); err != nil {
 					logError("Error in subscription handler: %s", err)
 				}
 			} else {
-				logError("No subscription handler for %s", subData.topic)
+				logError("No subscription handler for %s", subData.Topic)
 			}
 		case <-del.stopSubCh:
 			return

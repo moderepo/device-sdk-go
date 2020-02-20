@@ -32,6 +32,11 @@ type (
 	}
 	TestMqttConfigDelegate struct {
 	}
+
+	TestMqttErrorDelegate struct {
+		errorChBufSize uint16
+		errorCh        chan error
+	}
 )
 
 func (*TestMqttAuthDelegate) TLSUsageAndConfiguration() (useTLS bool, tlsConfig *tls.Config) {
@@ -59,12 +64,37 @@ func (*TestMqttConfigDelegate) GetSendQueueSize() uint16 {
 	return uint16(0)
 }
 
+func (ed *TestMqttErrorDelegate) GetErrorChannelSize() uint16 {
+	return ed.errorChBufSize
+}
+
+func (ed *TestMqttErrorDelegate) SetErrorChannel(errCh chan error) {
+	ed.errorCh = errCh
+}
+
 func newTestMqttDelegate() *TestMqttDelegate {
 	d := &TestMqttDelegate{
 		username:         "good",
 		password:         "anything",
 		receiveQueueSize: 2,
 		sendQueueSize:    2,
+		responseTimeout:  2 * time.Second,
+		subscriptions: []string{
+			fmt.Sprintf("/devices/%s/command", "foo"),
+			fmt.Sprintf("/devices/%s/kv", "bar"),
+		},
+	}
+
+	return d
+}
+
+func newTestMqttDelegateWithSettings(recvSize uint16,
+	sendSize uint16) *TestMqttDelegate {
+	d := &TestMqttDelegate{
+		username:         "good",
+		password:         "anything",
+		receiveQueueSize: recvSize,
+		sendQueueSize:    sendSize,
 		responseTimeout:  2 * time.Second,
 		subscriptions: []string{
 			fmt.Sprintf("/devices/%s/command", "foo"),
@@ -120,7 +150,7 @@ func (del *TestMqttDelegate) createContext() (context.Context, context.CancelFun
 func testConnection(ctx context.Context, t *testing.T, delegate MqttDelegate,
 	expectError bool) *MqttClient {
 
-	client := NewMqttClient(testMqttHost, testMqttPort,
+	client := NewMqttClient(TestMqttHost, TestMqttPort,
 		WithMqttDelegate(delegate))
 	err := client.Connect(ctx)
 	if expectError {
@@ -147,26 +177,26 @@ func TestCreateMqttClient(t *testing.T) {
 
 	t.Run("Incomplete implementations", func(t *testing.T) {
 		var client *MqttClient
-		client = NewMqttClient(testMqttHost, testMqttPort,
+		client = NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttAuthDelegate(authDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(testMqttHost, testMqttPort,
+		client = NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttReceiverDelegate(recvDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(testMqttHost, testMqttPort,
+		client = NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttConfigDelegate(confDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(testMqttHost, testMqttPort,
+		client = NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttAuthDelegate(authDel),
 			WithMqttConfigDelegate(confDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
 	})
 
 	t.Run("Good combinations", func(t *testing.T) {
-		client := NewMqttClient(testMqttHost, testMqttPort,
+		client := NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttDelegate(allInOne))
 		assert.NotNil(t, client, "Unexpected failure in creating client")
-		client = NewMqttClient(testMqttHost, testMqttPort,
+		client = NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttAuthDelegate(authDel),
 			WithMqttReceiverDelegate(recvDel),
 			WithMqttConfigDelegate(confDel))
@@ -178,7 +208,7 @@ func TestMqttClientConnection(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, nil)
+	DummyMQTTD(ctx, &wg, nil)
 
 	t.Run("Fail to Connect bad user/pass", func(t *testing.T) {
 		badDelegate := invalidTestMqttDelegate()
@@ -198,11 +228,11 @@ func TestMqttClientReconnect(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, nil)
+	DummyMQTTD(ctx, &wg, nil)
 	delegate := newTestMqttDelegate()
 
 	t.Run("Connect", func(t *testing.T) {
-		client := NewMqttClient(testMqttHost, testMqttPort,
+		client := NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
@@ -214,7 +244,7 @@ func TestMqttClientReconnect(t *testing.T) {
 	})
 	t.Run("ReConnect", func(t *testing.T) {
 		// recreate the closed channels that were closed on OnClose()
-		client := NewMqttClient(testMqttHost, testMqttPort,
+		client := NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
@@ -230,7 +260,7 @@ func TestMqttClientSubscribe(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, nil)
+	DummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientSubscribe")
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(ctx, t, goodDelegate, false)
@@ -250,7 +280,7 @@ func TestMqttClientPublish(t *testing.T) {
 	delegate := newTestMqttDelegate()
 	ctx, cancel := delegate.createContext()
 	wg.Add(1)
-	dummyMQTTD(ctx, &wg, nil)
+	DummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientPublish")
 
 	client := testConnection(ctx, t, delegate, false)
@@ -302,12 +332,12 @@ func sendPing(ctx context.Context, t *testing.T, client *MqttClient,
 func TestMqttClientPing(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
-	cmdCh := make(chan dummyCmd)
-	dummyMQTTD(nil, &wg, cmdCh)
+	cmdCh := make(chan DummyCmd)
+	DummyMQTTD(nil, &wg, cmdCh)
 
 	delegate := newTestMqttDelegate()
 
-	t.Run("Successful Ping", func(t *testing.T) {
+	t.Run("Successful Async Ping", func(t *testing.T) {
 		ctx, cancel := delegate.createContext()
 		defer cancel()
 		client := testConnection(ctx, t, delegate, false)
@@ -317,62 +347,144 @@ func TestMqttClientPing(t *testing.T) {
 		assert.Nil(t, err, "error disconnecting")
 	})
 
-	t.Run("Ping with Timeout", func(t *testing.T) {
+	t.Run("Successful sync Ping", func(t *testing.T) {
 		ctx, cancel := delegate.createContext()
 		defer cancel()
 		client := testConnection(ctx, t, delegate, false)
-		cmdCh <- slowdownServerCmd
-		// Wait for the ack, but it will timeout
-		err := sendPing(ctx, t, client, delegate)
-		assert.NotNil(t, err, "Received expected error")
-		cmdCh <- resetServerCmd
-		client.Disconnect(ctx)
-	})
-
-	t.Run("Ping with full queue", func(t *testing.T) {
-		// Create a new delegate which has a bigger ping response buffer
-		pingQueueSize := uint16(4)
-		queueDel := &TestMqttDelegate{
-			username:         "good",
-			password:         "anything",
-			receiveQueueSize: pingQueueSize,
-			sendQueueSize:    2,
-			// This test takes some round trips, so don't time out too soon
-			responseTimeout: 5 * time.Second,
-		}
-		ctx, cancel := queueDel.createContext()
-		defer cancel()
-		client := testConnection(ctx, t, queueDel, false)
-		assert.NotNil(t, client, "Failed to create a client and connect")
-
-		// Loop through and ping 6 times.
-		for i := uint16(0); i < pingQueueSize; i++ {
-			logInfo("Sending ping: %d", i)
-			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
-		}
-
-		// Wait for the round trip, but don't check...
-		timer := time.NewTimer(4 * time.Second)
-		<-timer.C
-
-		extraPings := int(2 * pingQueueSize)
-		numPings := 0
-		assert.Nil(t, client.GetLastError(), "Queue Already full?")
-		var err error = nil
-		// Since this is a synchronous, keep writing
-		for err == nil && numPings < extraPings {
-			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
-			timer = time.NewTimer(100 * time.Millisecond)
-			<-timer.C
-			err = client.GetLastError()
-		}
-		assert.NotNil(t, err, "Should have hit resonse queue error")
-
+		err := client.PingAndWait(ctx)
+		assert.Nil(t, err, "ping failed")
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
 	})
 
+	t.Run("Ping with Timeout", func(t *testing.T) {
+		ctx, cancel := delegate.createContext()
+		defer cancel()
+		client := testConnection(ctx, t, delegate, false)
+		cmdCh <- SlowdownServerCmd
+		// Wait for the ack, but it will timeout
+		err := sendPing(ctx, t, client, delegate)
+		assert.NotNil(t, err, "Received expected error")
+		cmdCh <- ResetServerCmd
+		client.Disconnect(ctx)
+	})
+
 	logInfo("Sending shutdown to server")
-	cmdCh <- shutdownCmd
+	cmdCh <- ShutdownCmd
+	wg.Wait()
+}
+
+func waitForCondition(ctx context.Context, timeout time.Duration,
+	cond func() bool) bool {
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
+	defer timeoutCancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	for !cond() {
+		select {
+		case <-ticker.C:
+		case <-timeoutCtx.Done():
+			return false
+		}
+	}
+	return true
+}
+
+func TestMqttErrorHandling(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	cmdCh := make(chan DummyCmd)
+	DummyMQTTD(nil, &wg, cmdCh)
+	timeout := 4 * time.Second
+
+	queueSize := uint16(2)
+	delegate := newTestMqttDelegateWithSettings(queueSize, queueSize)
+
+	t.Run("TestNoErrorDelegate", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		client := NewMqttClient(TestMqttHost, TestMqttPort,
+			WithMqttDelegate(delegate))
+		assert.Equal(t, len(client.TakeRemainingErrors()), 0,
+			"Unexpected errors in last errors")
+		assert.Nil(t, client.Connect(ctx), "Failed to connect")
+		// Send some pings, but don't read the responses
+		for i := 0; i < int(queueSize); i++ {
+			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
+		}
+		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
+			return len(delegate.pingAckCh) == 2
+		}), "Ping response queue never filled")
+
+		assert.Nil(t, client.Ping(ctx), "Send of ping failed")
+		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			return len(client.TakeRemainingErrors()) > 0
+		}), "TakeRemainingErrors never populated")
+		assert.Nil(t, client.Disconnect(ctx), "Error in disconnect")
+	})
+
+	t.Run("TestErrorDelegate", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		errorDelegate := TestMqttErrorDelegate{errorChBufSize: queueSize}
+		client := NewMqttClient(TestMqttHost, TestMqttPort,
+			WithMqttDelegate(delegate), WithMqttErrorDelegate(&errorDelegate))
+		assert.Nil(t, client.Connect(ctx), "Failed to connect")
+		// check that our error channel is empty
+		assert.Equal(t, len(errorDelegate.errorCh), 0,
+			"UnExpected errors in channela")
+		// Send some pings, but don't read the responses
+		for i := 0; i < int(queueSize); i++ {
+			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
+		}
+		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
+			return len(delegate.pingAckCh) == 2
+		}), "Ping response queue never filled")
+
+		assert.Nil(t, client.Ping(ctx), "Send of ping failed")
+		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
+			return len(errorDelegate.errorCh) > 0
+		}), "Error delegate  queue never filled")
+		assert.Nil(t, client.Disconnect(ctx), "Error in disconnect")
+	})
+
+	t.Run("TestErrorDelegateOverflow", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		errorDelegate := TestMqttErrorDelegate{errorChBufSize: queueSize}
+		client := NewMqttClient(TestMqttHost, TestMqttPort,
+			WithMqttDelegate(delegate), WithMqttErrorDelegate(&errorDelegate))
+		assert.Nil(t, client.Connect(ctx), "Failed to connect")
+		// check that our error channel is empty
+		assert.Equal(t, len(errorDelegate.errorCh), 0,
+			"Unexpected errors in channels")
+		assert.Equal(t, len(client.TakeRemainingErrors()), 0,
+			"Unexpected errors in last errors")
+
+		// Fill two queues which are the same size, plus one overflow
+		for i := 0; i <= 2*int(queueSize); i++ {
+			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
+		}
+		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
+			return len(delegate.pingAckCh) == 2
+		}), "Ping response queue never filled")
+		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
+			return len(errorDelegate.errorCh) == 2
+		}), "Error delegate queue never filled")
+
+		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
+			return len(client.TakeRemainingErrors()) > 0
+		}), "TakeRemainingErrors never populated")
+
+		assert.Nil(t, client.Disconnect(ctx), "Error in disconnect")
+	})
+
+	logInfo("Sending shutdown to server")
+	cmdCh <- ShutdownCmd
 	wg.Wait()
 }

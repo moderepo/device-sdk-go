@@ -13,42 +13,55 @@ import (
 	packet "github.com/moderepo/device-sdk-go/v3/mqtt_packet"
 )
 
-type publishMode int
-type dummyCmd int
+type DummyCmd int
 
 const (
-	publishKvUpdate publishMode = iota
-	publishCommand
-
-	// publishes a kv sync
-	publishKvCmd dummyCmd = iota
-	// publishes a command
-	publishCommandCmd
-	shutdownCmd
-	slowdownServerCmd
-	resetServerCmd
+	// Tells the server to publish on whatever topics a client is subscribed to
+	PublishCmd DummyCmd = iota
+	// Tells the server to publish a kv sync
+	PublishKvCmd
+	// Tells the server to publish a command
+	PublishCommandCmd
+	// Shuts the server down
+	ShutdownCmd
+	// Disconnects all connections
+	DisconnectCmd
+	// Inserts a 3 second delay after receiving the next command
+	SlowdownServerCmd
+	// Resets the server to normal
+	ResetServerCmd
 )
 
 var (
-	testMqttHost   = "localhost"
-	testMqttPort   = 1998
-	useTLS         = false
-	requestTimeout = 2 * time.Second
+	TestMqttHost   = "localhost"
+	TestMqttPort   = 1998
+	UseTLS         = false
+	RequestTimeout = 2 * time.Second
 	currentDevice  = ""
+	TestUsername   = "good"
+	TestSubData    []byte
 )
 
-type dummyContext struct {
-	ctx      context.Context
-	cmdCh    chan dummyCmd
-	listener net.Listener
-	conns    []net.Conn
-	waitTime time.Duration
-}
+type (
+	// current connections
+	dummyClient struct {
+		conn          net.Conn
+		subscriptions []string
+	}
+
+	dummyContext struct {
+		ctx      context.Context
+		cmdCh    chan DummyCmd
+		listener net.Listener
+		clients  []*dummyClient
+		waitTime time.Duration
+	}
+)
 
 func doConnect(connPkt *packet.ConnectPacket) (*packet.ConnackPacket, bool) {
 	ackPack := packet.NewConnackPacket()
 	keepConn := false
-	if connPkt.Username == "good" || connPkt.Username == "1234" {
+	if connPkt.Username == TestUsername || connPkt.Username == "1234" {
 		logInfo("[MQTTD] accepting username: %s", connPkt.Username)
 		currentDevice = connPkt.Username
 		ackPack.ReturnCode = packet.ConnectionAccepted
@@ -91,12 +104,12 @@ func readPacket(conn net.Conn) (numBytes int, bytesRead []byte, err error) {
 	return numBytes, tmp, nil
 }
 
-func handleSession(context *dummyContext, conn net.Conn) {
+func handleSession(context *dummyContext, client *dummyClient) {
 	keepConn := true
 
 	for keepConn {
 		// Read until command says quit or we get a disconnect
-		bytesRead, packetBytes, err := readPacket(conn)
+		bytesRead, packetBytes, err := readPacket(client.conn)
 		if context.waitTime > 0 {
 			logInfo("[MQTTD] Pausing server...")
 			timer := time.NewTimer(context.waitTime)
@@ -111,20 +124,23 @@ func handleSession(context *dummyContext, conn net.Conn) {
 			break
 		}
 		var respPkt packet.Packet
-		respPkt, keepConn = getResponsePacket(packetBytes, bytesRead)
+		respPkt, keepConn = getResponsePacket(client, packetBytes, bytesRead)
+
 		if respPkt != nil {
-			if err := writePacket(conn, respPkt, false); err != nil {
+			if err := writePacket(client.conn, respPkt, false); err != nil {
 				logError("[MQTTD] Error writing packet to client: %s", err)
-				// write error is likely a missing client, so we end the connection
+				// write error is likely a missing client, so we end the
+				// connection
 				keepConn = false
 			}
 		}
 	}
 	logInfo("[MQTTD] closing connection")
-	conn.Close()
+	client.conn.Close()
 }
 
-func getResponsePacket(pktBytes []byte, pktLen int) (pkt packet.Packet, keepConn bool) {
+func getResponsePacket(client *dummyClient, pktBytes []byte,
+	pktLen int) (pkt packet.Packet, keepConn bool) {
 	keepConn = true
 	l, ty := packet.DetectPacket(pktBytes[0:pktLen])
 	if ty == packet.CONNECT {
@@ -132,7 +148,14 @@ func getResponsePacket(pktBytes []byte, pktLen int) (pkt packet.Packet, keepConn
 		inPkt.Decode(pktBytes[0:l])
 		pkt, keepConn = doConnect(inPkt)
 	} else if ty == packet.SUBSCRIBE {
-		pkt = &packet.SubackPacket{PacketID: 1, ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
+		inPkt := packet.NewSubscribePacket()
+		inPkt.Decode(pktBytes[0:l])
+		for _, sub := range inPkt.Subscriptions {
+			client.subscriptions = append(client.subscriptions, sub.Topic)
+		}
+		// Add the topics to the client
+		pkt = &packet.SubackPacket{PacketID: 1,
+			ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
 	} else if ty == packet.PINGREQ {
 		pkt = packet.NewPingrespPacket()
 	} else if ty == packet.DISCONNECT {
@@ -154,11 +177,27 @@ func getResponsePacket(pktBytes []byte, pktLen int) (pkt packet.Packet, keepConn
 	return pkt, keepConn
 }
 
-func sendPublish(conn net.Conn, pubMode publishMode) {
-	var pkt packet.Packet
+func sendPublish(client *dummyClient, pubCmd DummyCmd) {
+	if client == nil {
+		return
+	}
+	var pkts []packet.Packet
 
-	switch pubMode {
-	case publishKvUpdate:
+	switch pubCmd {
+	case PublishCmd:
+		for _, topic := range client.subscriptions {
+			// publish some data on the clients' topics. (If we want specific
+			// data, we'll have to use some new mechanism.)
+			pubPkt := packet.NewPublishPacket()
+			pubPkt.Message = packet.Message{
+				Topic:   topic,
+				Payload: TestSubData,
+				QOS:     packet.QOSAtMostOnce,
+			}
+			pubPkt.PacketID = 1
+			pkts = append(pkts, pubPkt)
+		}
+	case PublishKvCmd:
 		kvData := KeyValueSync{
 			Action:   KVSyncActionReload,
 			Revision: 2,
@@ -177,8 +216,8 @@ func sendPublish(conn net.Conn, pubMode publishMode) {
 		kvPkt := packet.NewPublishPacket()
 		kvPkt.Message = m
 		kvPkt.PacketID = 1
-		pkt = kvPkt
-	case publishCommand:
+		pkts = append(pkts, kvPkt)
+	case PublishCommandCmd:
 		var cmd struct {
 			Action     string            `json:"action" binding:"required"`
 			Parameters map[string]string `json:"parameters,omitempty"`
@@ -194,17 +233,33 @@ func sendPublish(conn net.Conn, pubMode publishMode) {
 		cmdPkt := packet.NewPublishPacket()
 		cmdPkt.Message = m
 		cmdPkt.PacketID = 2
-		pkt = cmdPkt
+		pkts = append(pkts, cmdPkt)
 	}
 
-	if pkt != nil {
+	for _, pkt := range pkts {
 		timer := time.NewTimer(1 * time.Second)
 		<-timer.C
 
-		if err := writePacket(conn, pkt, true); err != nil {
+		if err := writePacket(client.conn, pkt, true); err != nil {
 			logError("[MQTTD] Error writing packet to client: %s", err)
 		}
 	}
+}
+
+func spawnSession(context *dummyContext, conn net.Conn) {
+	client := &dummyClient{
+		conn: conn,
+	}
+	context.clients = append(context.clients, client)
+	defer func() {
+		for i, c := range context.clients {
+			if c == client {
+				context.clients[i] = nil
+			}
+		}
+	}()
+
+	handleSession(context, client)
 }
 
 func runServer(wg *sync.WaitGroup, context *dummyContext, listener net.Listener) {
@@ -214,8 +269,8 @@ func runServer(wg *sync.WaitGroup, context *dummyContext, listener net.Listener)
 		if err != nil {
 			break
 		}
-		context.conns = append(context.conns, conn)
-		go handleSession(context, conn)
+		logInfo("[MQTTD] Starting new session")
+		go spawnSession(context, conn)
 	}
 }
 
@@ -223,19 +278,17 @@ func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
 	defer wg.Done()
 	for cmd := range context.cmdCh {
 		switch cmd {
-		case publishKvCmd:
-			for _, conn := range context.conns {
-				go sendPublish(conn, publishKvUpdate)
+		case PublishCmd, PublishKvCmd, PublishCommandCmd:
+			for _, client := range context.clients {
+				go sendPublish(client, cmd)
 			}
-		case publishCommandCmd:
-			for _, conn := range context.conns {
-				go sendPublish(conn, publishCommand)
-			}
-		case slowdownServerCmd:
+		case SlowdownServerCmd:
 			context.waitTime = 3 * time.Second
-		case resetServerCmd:
+		case DisconnectCmd:
+			closeConnections(context)
+		case ResetServerCmd:
 			context.waitTime = 0
-		case shutdownCmd:
+		case ShutdownCmd:
 			performShutdown(context)
 		}
 	}
@@ -250,14 +303,20 @@ func runWaitForCancel(wg *sync.WaitGroup, context *dummyContext) {
 func performShutdown(context *dummyContext) {
 	// Tells the server to not accept new connections
 	context.listener.Close()
-	// Close the current connection
-	for _, conn := range context.conns {
-		conn.Close()
-	}
+	closeConnections(context)
 	if context.cmdCh != nil {
 		// close the command channel so it doesn't listen to any more commands
 		close(context.cmdCh)
 	}
+}
+
+func closeConnections(context *dummyContext) {
+	for _, client := range context.clients {
+		if client != nil {
+			client.conn.Close()
+		}
+	}
+	context.clients = nil
 }
 
 // Dummy MQTT server. It will run an MQTT server as a goroutine. An optional
@@ -268,9 +327,9 @@ func performShutdown(context *dummyContext) {
 //
 // To end the server, either close the command channel or call cancel() on the
 // context.
-func dummyMQTTD(ctx context.Context, wg *sync.WaitGroup,
-	cmdCh chan dummyCmd) bool {
-	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", testMqttHost, testMqttPort))
+func DummyMQTTD(ctx context.Context, wg *sync.WaitGroup,
+	cmdCh chan DummyCmd) bool {
+	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", TestMqttHost, TestMqttPort))
 	if err != nil {
 		panic(err)
 	}
