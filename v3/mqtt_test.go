@@ -404,7 +404,7 @@ func TestMqttErrorHandling(t *testing.T) {
 		defer cancel()
 		client := NewMqttClient(TestMqttHost, TestMqttPort,
 			WithMqttDelegate(delegate))
-		assert.Equal(t, len(client.GetLastErrors()), 0,
+		assert.Equal(t, len(client.TakeRemainingErrors()), 0,
 			"Unexpected errors in last errors")
 		assert.Nil(t, client.Connect(ctx), "Failed to connect")
 		// Send some pings, but don't read the responses
@@ -412,13 +412,14 @@ func TestMqttErrorHandling(t *testing.T) {
 			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		}
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
 			return len(delegate.pingAckCh) == 2
 		}), "Ping response queue never filled")
 
 		assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			return len(client.GetLastErrors()) > 0
-		}), "GetLastErrors never populated")
+			return len(client.TakeRemainingErrors()) > 0
+		}), "TakeRemainingErrors never populated")
 		assert.Nil(t, client.Disconnect(ctx), "Error in disconnect")
 	})
 
@@ -437,11 +438,13 @@ func TestMqttErrorHandling(t *testing.T) {
 			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		}
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
 			return len(delegate.pingAckCh) == 2
 		}), "Ping response queue never filled")
 
 		assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
 			return len(errorDelegate.errorCh) > 0
 		}), "Error delegate  queue never filled")
 		assert.Nil(t, client.Disconnect(ctx), "Error in disconnect")
@@ -457,7 +460,7 @@ func TestMqttErrorHandling(t *testing.T) {
 		// check that our error channel is empty
 		assert.Equal(t, len(errorDelegate.errorCh), 0,
 			"Unexpected errors in channels")
-		assert.Equal(t, len(client.GetLastErrors()), 0,
+		assert.Equal(t, len(client.TakeRemainingErrors()), 0,
 			"Unexpected errors in last errors")
 
 		// Fill two queues which are the same size, plus one overflow
@@ -465,15 +468,18 @@ func TestMqttErrorHandling(t *testing.T) {
 			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		}
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
 			return len(delegate.pingAckCh) == 2
 		}), "Ping response queue never filled")
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
+			client.Ping(ctx)
 			return len(errorDelegate.errorCh) == 2
 		}), "Error delegate queue never filled")
 
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			return len(client.GetLastErrors()) > 0
-		}), "GetLastErrors never populated")
+			client.Ping(ctx)
+			return len(client.TakeRemainingErrors()) > 0
+		}), "TakeRemainingErrors never populated")
 
 		assert.Nil(t, client.Disconnect(ctx), "Error in disconnect")
 	})

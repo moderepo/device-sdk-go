@@ -553,18 +553,21 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 	receiveTime time.Time) {
 	logInfo("[MQTT] received message for topic %s", p.Message.Topic)
 
-	pubData := MqttSubData{p.Message.Topic, p.Message.Payload, receiveTime}
+	pubData := MqttSubData{
+		Topic:       p.Message.Topic,
+		Data:        p.Message.Payload,
+		ReceiveTime: receiveTime,
+	}
 
 	// If we have successfully queued the pub to the user
-	queueSuccess := false
 	select {
 	case client.delegateSubRecvCh <- pubData:
-		queueSuccess = true
 	default:
 		logError("Caller could not receive publish data. SubRecCh full?")
 		client.conn.sendQueueingError(nil)
+		return
 	}
-	if queueSuccess && p.Message.QOS != packet.QOSAtMostOnce {
+	if p.Message.QOS != packet.QOSAtMostOnce {
 		ackPkt := packet.NewPubackPacket()
 		ackPkt.PacketID = p.PacketID
 		// For everything except QOS2: if we have queued the message to the
@@ -582,7 +585,7 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 // Returns the last errors, and then resets the errors. If there is no
 // error delegate or the error delegate's error channel is full, we "queue"
 // errors in a slice that can be fetched.
-func (client *MqttClient) GetLastErrors() []error {
+func (client *MqttClient) TakeRemainingErrors() []error {
 	defer func() {
 		client.lastErrors = make([]error, 0, 5)
 	}()
@@ -927,11 +930,11 @@ func (conn *mqttConn) sendQueueingError(err error) {
 			logInfo("Error Queued to delegate %d/%d", len(conn.errCh),
 				cap(conn.errCh))
 		default:
-			logInfo("Error delegate channel full. Check GetLastErrors")
+			logInfo("Error delegate channel full. Check TakeRemainingErrors")
 			conn.Receiver.appendError(err)
 		}
 	} else {
-		logInfo("No Error delegate channel. Check GetLastErrors")
+		logInfo("No Error delegate channel. Check TakeRemainingErrors")
 		conn.Receiver.appendError(err)
 	}
 }
