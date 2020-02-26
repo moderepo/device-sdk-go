@@ -33,16 +33,24 @@ const (
 )
 
 var (
-	TestMqttHost   = "localhost"
-	TestMqttPort   = 1998
-	UseTLS         = false
-	RequestTimeout = 2 * time.Second
-	currentDevice  = ""
-	TestUsername   = "good"
-	TestSubData    []byte
+	DefaultMqttHost = "localhost"
+	DefaultMqttPort = 1998
+	DefaultUsers    = []string{"good", "1234"}
+	DefaultSubData  []byte
+
+	currentDevice = "" // XXX - fix the logic that stores this globally
+
+	globalConf DummyConfig
 )
 
 type (
+	DummyConfig struct {
+		MqttHost string
+		MqttPort int
+		Users    []string
+		SubData  []byte
+	}
+
 	// current connections
 	dummyClient struct {
 		conn          net.Conn
@@ -58,10 +66,20 @@ type (
 	}
 )
 
+func isValidUser(user string, testUsers []string) bool {
+	for _, vUser := range testUsers {
+		if user == vUser {
+			return true
+		}
+	}
+
+	return false
+}
+
 func doConnect(connPkt *packet.ConnectPacket) (*packet.ConnackPacket, bool) {
 	ackPack := packet.NewConnackPacket()
 	keepConn := false
-	if connPkt.Username == TestUsername || connPkt.Username == "1234" {
+	if isValidUser(connPkt.Username, globalConf.Users) {
 		logInfo("[MQTTD] accepting username: %s", connPkt.Username)
 		currentDevice = connPkt.Username
 		ackPack.ReturnCode = packet.ConnectionAccepted
@@ -191,7 +209,7 @@ func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 			pubPkt := packet.NewPublishPacket()
 			pubPkt.Message = packet.Message{
 				Topic:   topic,
-				Payload: TestSubData,
+				Payload: globalConf.SubData,
 				QOS:     packet.QOSAtMostOnce,
 			}
 			pubPkt.PacketID = 1
@@ -329,7 +347,20 @@ func closeConnections(context *dummyContext) {
 // context.
 func DummyMQTTD(ctx context.Context, wg *sync.WaitGroup,
 	cmdCh chan DummyCmd) bool {
-	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", TestMqttHost, TestMqttPort))
+
+	conf := DummyConfig{
+		MqttHost: DefaultMqttHost,
+		MqttPort: DefaultMqttPort,
+		Users:    DefaultUsers,
+	}
+	return DummyMQTTDWithConfig(ctx, wg, cmdCh, conf)
+}
+
+func DummyMQTTDWithConfig(ctx context.Context, wg *sync.WaitGroup,
+	cmdCh chan DummyCmd, conf DummyConfig) bool {
+	globalConf = conf
+	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", conf.MqttHost,
+		conf.MqttPort))
 	if err != nil {
 		panic(err)
 	}

@@ -150,7 +150,7 @@ func (del *TestMqttDelegate) createContext() (context.Context, context.CancelFun
 func testConnection(ctx context.Context, t *testing.T, delegate MqttDelegate,
 	expectError bool) *MqttClient {
 
-	client := NewMqttClient(TestMqttHost, TestMqttPort,
+	client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 		WithMqttDelegate(delegate))
 	err := client.Connect(ctx)
 	if expectError {
@@ -177,26 +177,26 @@ func TestCreateMqttClient(t *testing.T) {
 
 	t.Run("Incomplete implementations", func(t *testing.T) {
 		var client *MqttClient
-		client = NewMqttClient(TestMqttHost, TestMqttPort,
+		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttAuthDelegate(authDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(TestMqttHost, TestMqttPort,
+		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttReceiverDelegate(recvDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(TestMqttHost, TestMqttPort,
+		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttConfigDelegate(confDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(TestMqttHost, TestMqttPort,
+		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttAuthDelegate(authDel),
 			WithMqttConfigDelegate(confDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
 	})
 
 	t.Run("Good combinations", func(t *testing.T) {
-		client := NewMqttClient(TestMqttHost, TestMqttPort,
+		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttDelegate(allInOne))
 		assert.NotNil(t, client, "Unexpected failure in creating client")
-		client = NewMqttClient(TestMqttHost, TestMqttPort,
+		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttAuthDelegate(authDel),
 			WithMqttReceiverDelegate(recvDel),
 			WithMqttConfigDelegate(confDel))
@@ -232,7 +232,7 @@ func TestMqttClientReconnect(t *testing.T) {
 	delegate := newTestMqttDelegate()
 
 	t.Run("Connect", func(t *testing.T) {
-		client := NewMqttClient(TestMqttHost, TestMqttPort,
+		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
@@ -244,7 +244,7 @@ func TestMqttClientReconnect(t *testing.T) {
 	})
 	t.Run("ReConnect", func(t *testing.T) {
 		// recreate the closed channels that were closed on OnClose()
-		client := NewMqttClient(TestMqttHost, TestMqttPort,
+		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
@@ -402,7 +402,7 @@ func TestMqttErrorHandling(t *testing.T) {
 	t.Run("TestNoErrorDelegate", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		client := NewMqttClient(TestMqttHost, TestMqttPort,
+		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttDelegate(delegate))
 		assert.Equal(t, len(client.TakeRemainingErrors()), 0,
 			"Unexpected errors in last errors")
@@ -427,7 +427,7 @@ func TestMqttErrorHandling(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		errorDelegate := TestMqttErrorDelegate{errorChBufSize: queueSize}
-		client := NewMqttClient(TestMqttHost, TestMqttPort,
+		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttDelegate(delegate), WithMqttErrorDelegate(&errorDelegate))
 		assert.Nil(t, client.Connect(ctx), "Failed to connect")
 		// check that our error channel is empty
@@ -454,7 +454,7 @@ func TestMqttErrorHandling(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		errorDelegate := TestMqttErrorDelegate{errorChBufSize: queueSize}
-		client := NewMqttClient(TestMqttHost, TestMqttPort,
+		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
 			WithMqttDelegate(delegate), WithMqttErrorDelegate(&errorDelegate))
 		assert.Nil(t, client.Connect(ctx), "Failed to connect")
 		// check that our error channel is empty
