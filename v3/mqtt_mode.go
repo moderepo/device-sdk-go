@@ -202,9 +202,9 @@ func (del *ModeMqttDelegate) OnClose() {
 	}
 	close(del.command)
 	close(del.kvSync)
-	// By default, there are no listeners for the PingAckCh and QueueAckCh. If there
-	// are goroutines listening to those channels, this is where they can be signaled
-	// to stop
+	// By default, there are no listeners for the PingAckCh and QueueAckCh. If
+	// there are goroutines listening to those channels, this is where they can
+	// be signaled to stop
 }
 
 func (del *ModeMqttDelegate) createContext() (context.Context, context.CancelFunc) {
