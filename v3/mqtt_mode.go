@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,7 +20,7 @@ const (
 )
 
 type (
-	mqttMsgHandler func([]byte) error
+	MqttMsgHandler func([]byte) error
 
 	// DeviceCommand represents a received from the MODE cloud.
 	DeviceCommand struct {
@@ -60,15 +61,14 @@ type (
 	// Implements the MqttDelegate
 	ModeMqttDelegate struct {
 		dc            *DeviceContext
-		subscriptions map[string]mqttMsgHandler
+		subscriptions map[string]MqttMsgHandler
 
 		receiveQueueSize uint16
 		sendQueueSize    uint16
-		responseTimeout  time.Duration
 
 		// For handling our subscriptions. Output
-		command chan<- *DeviceCommand
-		kvSync  chan<- *KeyValueSync
+		command chan *DeviceCommand
+		kvSync  chan *KeyValueSync
 
 		// Stop listening for incoming subscription data
 		stopSubCh chan bool
@@ -77,54 +77,73 @@ type (
 		QueueAckCh <-chan MqttResponse
 		PingAckCh  <-chan MqttResponse
 	}
-)
 
-type (
-	ModeMqttOptDuration    time.Duration
-	ModeMqttOptQueueLength int16
-
-	ModeMqttDelegateOpt interface {
-		apply(d *ModeMqttDelegate)
-	}
+	ModeMqttDelegateOption func(*ModeMqttDelegate)
 )
 
 var _ MqttDelegate = (*ModeMqttDelegate)(nil)
 
-func (dur ModeMqttOptDuration) apply(del *ModeMqttDelegate) {
-	del.responseTimeout = time.Duration(dur)
+func WithReceiveQueueSize(qSize uint16) func(*ModeMqttDelegate) {
+	return func(d *ModeMqttDelegate) {
+		d.receiveQueueSize = qSize
+	}
 }
 
-func (len ModeMqttOptQueueLength) apply(del *ModeMqttDelegate) {
-	del.sendQueueSize = uint16(len)
+func WithSendQueueSize(qSize uint16) func(*ModeMqttDelegate) {
+	return func(d *ModeMqttDelegate) {
+		d.sendQueueSize = qSize
+	}
+}
+
+func WithAdditionalSubscription(topic string,
+	handler MqttMsgHandler) func(*ModeMqttDelegate) {
+	return func(d *ModeMqttDelegate) {
+		d.subscriptions[topic] = handler
+	}
+}
+
+// This is a little obtuse, but allows a format string where we substitute
+// a %d. So, we check for the %d in the string.
+func WithAdditionalFormatSubscription(formatTopic string,
+	handler MqttMsgHandler) func(*ModeMqttDelegate) {
+	// panic if this is not the correct format.
+	if strings.Index(formatTopic, "%d") == -1 {
+		panic("No %d in topic's format string")
+	}
+	return func(d *ModeMqttDelegate) {
+		d.subscriptions[fmt.Sprintf(formatTopic, d.dc.DeviceID)] = handler
+	}
 }
 
 // Maybe have the channel sizes as parameters.
-func NewModeMqttDelegate(
-	dc *DeviceContext,
-	cmdQueue chan<- *DeviceCommand,
-	kvSyncQueue chan<- *KeyValueSync,
-	opts ...ModeMqttDelegateOpt) *ModeMqttDelegate {
+func NewModeMqttDelegate(dc *DeviceContext,
+	opts ...ModeMqttDelegateOption) *ModeMqttDelegate {
 	del := &ModeMqttDelegate{
 		dc:               dc,
-		receiveQueueSize: 8,               // some default
-		sendQueueSize:    8,               // some default
-		responseTimeout:  2 * time.Second, // some default
-		command:          cmdQueue,
-		kvSync:           kvSyncQueue,
-		SubRecvCh:        make(chan MqttSubData),
-		QueueAckCh:       make(chan MqttResponse),
-		PingAckCh:        make(chan MqttResponse),
+		receiveQueueSize: 8, // some default
+		sendQueueSize:    8, // some default
 	}
-	subs := make(map[string]mqttMsgHandler)
+	subs := make(map[string]MqttMsgHandler)
 	subs[fmt.Sprintf("/devices/%d/command", dc.DeviceID)] = del.handleCommandMsg
 	subs[fmt.Sprintf("/devices/%d/kv", dc.DeviceID)] = del.handleKeyValueMsg
 
 	del.subscriptions = subs
 
 	for _, opt := range opts {
-		opt.apply(del)
+		opt(del)
 	}
+	// Set the channels after all the options have been set.
+	del.command = make(chan *DeviceCommand, del.sendQueueSize)
+	del.kvSync = make(chan *KeyValueSync, del.sendQueueSize)
 	return del
+}
+
+func (del *ModeMqttDelegate) GetCommandChannel() chan *DeviceCommand {
+	return del.command
+}
+
+func (del *ModeMqttDelegate) GetKVSyncChannel() chan *KeyValueSync {
+	return del.kvSync
 }
 
 func (del *ModeMqttDelegate) GetDeviceContext() *DeviceContext {
@@ -207,10 +226,6 @@ func (del *ModeMqttDelegate) OnClose() {
 	// be signaled to stop
 }
 
-func (del *ModeMqttDelegate) createContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), del.responseTimeout)
-}
-
 func (del *ModeMqttDelegate) handleCommandMsg(data []byte) error {
 	var cmd struct {
 		Action     string          `json:"action"`
@@ -242,7 +257,6 @@ func (del *ModeMqttDelegate) handleKeyValueMsg(data []byte) error {
 		return errors.New("message data is not valid key-value sync JSON: no action field")
 	}
 
-	fmt.Println("Sending to kvSync channel")
 	del.kvSync <- &kvSync
 	return nil
 }
