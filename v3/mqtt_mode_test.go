@@ -17,28 +17,22 @@ var (
 	modeUseTLS   = false
 )
 
-func invalidModeMqttDelegate() (*ModeMqttDelegate, chan *DeviceCommand,
-	chan *KeyValueSync) {
+func invalidModeMqttDelegate() *ModeMqttDelegate {
 	dc := &DeviceContext{
 		DeviceID:  1,
 		AuthToken: "XXXX",
 	}
-	cmdQueue := make(chan *DeviceCommand)
-	kvSyncQueue := make(chan *KeyValueSync)
 
-	return NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue), cmdQueue, kvSyncQueue
+	return NewModeMqttDelegate(dc)
 }
 
-func newModeMqttDelegate() (*ModeMqttDelegate, chan *DeviceCommand,
-	chan *KeyValueSync) {
+func newModeMqttDelegate() *ModeMqttDelegate {
 	dc := &DeviceContext{
 		DeviceID:  1234,
 		AuthToken: "v1.XXXXXXXXX",
 	}
 
-	cmdQueue := make(chan *DeviceCommand, 1)
-	kvSyncQueue := make(chan *KeyValueSync, 1)
-	return NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue), cmdQueue, kvSyncQueue
+	return NewModeMqttDelegate(dc)
 }
 
 // Helper for some tests
@@ -46,7 +40,7 @@ func testModeConnection(ctx context.Context, t *testing.T,
 	delegate *ModeMqttDelegate, expectError bool) *MqttClient {
 	client := NewMqttClient(modeMqttHost, modeMqttPort,
 		WithMqttDelegate(delegate))
-	ctx, cancel := delegate.createContext()
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	err := client.Connect(ctx)
 	if expectError {
@@ -68,7 +62,7 @@ func testModeConnection(ctx context.Context, t *testing.T,
 func testModeWaitForPubAck(t *testing.T, delegate *ModeMqttDelegate,
 	expectTimeout bool) uint16 {
 	// Wait for the ack, or timeout
-	ctx, cancel := delegate.createContext()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	// Block on the return channel or timeout
@@ -94,11 +88,11 @@ func TestModeMqttClientConnection(t *testing.T) {
 	DummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestModeMqttClientConnection: test bad user/pass")
-	badDelegate, _, _ := invalidModeMqttDelegate()
+	badDelegate := invalidModeMqttDelegate()
 	testModeConnection(ctx, t, badDelegate, true)
 
 	fmt.Println("TestModeMqttClientConnection: test good user/pass")
-	goodDelegate, _, _ := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
 
 	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
@@ -115,7 +109,7 @@ func TestModeMqttClientSubscribe(t *testing.T) {
 	DummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestModeMqttClientSubscribe")
-	goodDelegate, _, _ := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
 	errs := client.Subscribe(ctx, goodDelegate.Subscriptions())
 	assert.Nil(t, errs, "failed to subscribe")
@@ -133,7 +127,7 @@ func TestModeMqttClientPing(t *testing.T) {
 	DummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPing")
-	goodDelegate, _, _ := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
 	assert.True(t, client.IsConnected(), "Lost connection")
 
@@ -160,7 +154,7 @@ func TestModeMqttClientPublishEvent(t *testing.T) {
 	DummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPublishEvent")
-	goodDelegate, _, _ := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
 	assert.True(t, client.IsConnected(), "Lost connection")
 
@@ -201,7 +195,7 @@ func TestModeMqttClientPublishBulkData(t *testing.T) {
 	DummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPublishBulkData")
-	goodDelegate, _, _ := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
 	assert.True(t, client.IsConnected(), "Lost connection")
 
@@ -229,7 +223,7 @@ func TestModeMqttClientPublishKVUpdate(t *testing.T) {
 	DummyMQTTD(ctx, &wg, nil)
 
 	fmt.Println("TestMqttClientPublishKVUpdate")
-	goodDelegate, _, _ := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
 	assert.True(t, client.IsConnected(), "Lost connection")
 
@@ -282,12 +276,12 @@ func TestModeMqttClientReceiveKVSync(t *testing.T) {
 	defer cancel()
 
 	fmt.Println("TestModeMqttClientReceiveKvSync")
-	goodDelegate, _, kvSyncChannel := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := NewMqttClient(modeMqttHost, modeMqttPort,
 		WithMqttDelegate(goodDelegate))
 	client.Connect(ctx)
 	// Tell the server to send a kv update
-	cmdCh <- PublishKvCmd
+	cmdCh <- PublishKvSync
 	// Start the listener
 	goodDelegate.StartSubscriptionListener()
 
@@ -301,7 +295,7 @@ func TestModeMqttClientReceiveKVSync(t *testing.T) {
 
 	receivedSubData := false
 	select {
-	case kvSync := <-kvSyncChannel:
+	case kvSync := <-goodDelegate.GetKVSyncChannel():
 		fmt.Printf("Received the sync from the server: %s\n", kvSync.Action)
 		fmt.Printf("Data: %v\n", kvSync)
 		receivedSubData = true
@@ -328,10 +322,10 @@ func TestModeMqttClientReceiveCommand(t *testing.T) {
 	DummyMQTTD(nil, &wg, cmdCh)
 
 	fmt.Println("TestModeMqttClientReceiveCommand")
-	goodDelegate, cmdChannel, _ := newModeMqttDelegate()
+	goodDelegate := newModeMqttDelegate()
 	client := NewMqttClient(modeMqttHost, modeMqttPort,
 		WithMqttDelegate(goodDelegate))
-	ctx, cancel := goodDelegate.createContext()
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client.Connect(ctx)
 
@@ -345,7 +339,7 @@ func TestModeMqttClientReceiveCommand(t *testing.T) {
 
 	receivedSubData := false
 	select {
-	case cmd := <-cmdChannel:
+	case cmd := <-goodDelegate.GetCommandChannel():
 		fmt.Printf("Received the command from the server: %s\n", cmd.Action)
 		receivedSubData = true
 		break

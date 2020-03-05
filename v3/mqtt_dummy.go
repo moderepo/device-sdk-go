@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	packet "github.com/moderepo/device-sdk-go/v3/mqtt_packet"
@@ -18,8 +19,10 @@ type DummyCmd int
 const (
 	// Tells the server to publish on whatever topics a client is subscribed to
 	PublishCmd DummyCmd = iota
-	// Tells the server to publish a kv sync
-	PublishKvCmd
+	// Tells the server to publish some kv commands
+	PublishKvSync
+	PublishKvSet
+	PublishKvDelete
 	// Tells the server to publish a command
 	PublishCommandCmd
 	// Shuts the server down
@@ -38,9 +41,16 @@ var (
 	DefaultUsers    = []string{"good", "1234"}
 	DefaultSubData  []byte
 
+	DefaultItems = []*KeyValue{
+		&KeyValue{Key: "key1", Value: "value1", ModificationTime: time.Now()},
+		&KeyValue{Key: "key2", Value: "value2", ModificationTime: time.Now()},
+	}
+
 	currentDevice = "" // XXX - fix the logic that stores this globally
 
 	globalConf DummyConfig
+	packetID   uint32 = 1
+	kvRevision uint32 = 1
 )
 
 type (
@@ -172,7 +182,8 @@ func getResponsePacket(client *dummyClient, pktBytes []byte,
 			client.subscriptions = append(client.subscriptions, sub.Topic)
 		}
 		// Add the topics to the client
-		pkt = &packet.SubackPacket{PacketID: 1,
+		pkt = &packet.SubackPacket{
+			PacketID:    uint16(atomic.AddUint32(&packetID, 1)),
 			ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
 	} else if ty == packet.PINGREQ {
 		pkt = packet.NewPingrespPacket()
@@ -195,6 +206,20 @@ func getResponsePacket(client *dummyClient, pktBytes []byte,
 	return pkt, keepConn
 }
 
+func packageKVPacket(kvData *KeyValueSync, topic string) packet.Packet {
+	data, _ := json.Marshal(kvData)
+	m := packet.Message{
+		Topic:   topic,
+		Payload: data,
+		QOS:     packet.QOSAtMostOnce,
+	}
+	kvPkt := packet.NewPublishPacket()
+	kvPkt.Message = m
+	kvPkt.PacketID = uint16(atomic.AddUint32(&packetID, 1))
+
+	return kvPkt
+}
+
 func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 	if client == nil {
 		return
@@ -212,29 +237,38 @@ func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 				Payload: globalConf.SubData,
 				QOS:     packet.QOSAtMostOnce,
 			}
-			pubPkt.PacketID = 1
+			pubPkt.PacketID = uint16(atomic.AddUint32(&packetID, 1))
 			pkts = append(pkts, pubPkt)
 		}
-	case PublishKvCmd:
+	case PublishKvSync:
 		kvData := KeyValueSync{
 			Action:   KVSyncActionReload,
-			Revision: 2,
+			Revision: int(atomic.AddUint32(&kvRevision, uint32(1))),
 			NumItems: 2,
-			Items: []*KeyValue{
-				&KeyValue{Key: "key1", Value: "value1", ModificationTime: time.Now()},
-				&KeyValue{Key: "key2", Value: "value2", ModificationTime: time.Now()},
-			},
+			Items:    DefaultItems,
 		}
-		data, _ := json.Marshal(kvData)
-		m := packet.Message{
-			Topic:   fmt.Sprintf("/devices/%s/kv", currentDevice),
-			Payload: data,
-			QOS:     packet.QOSAtMostOnce,
+		pkt := packageKVPacket(&kvData,
+			fmt.Sprintf("/devices/%s/kv", currentDevice))
+		pkts = append(pkts, pkt)
+	case PublishKvSet:
+		kvData := KeyValueSync{
+			Action:   KVSyncActionSet,
+			Revision: int(atomic.AddUint32(&kvRevision, uint32(1))),
+			Key:      "key3",
+			Value:    "value3",
 		}
-		kvPkt := packet.NewPublishPacket()
-		kvPkt.Message = m
-		kvPkt.PacketID = 1
-		pkts = append(pkts, kvPkt)
+		pkt := packageKVPacket(&kvData,
+			fmt.Sprintf("/devices/%s/kv", currentDevice))
+		pkts = append(pkts, pkt)
+	case PublishKvDelete:
+		kvData := KeyValueSync{
+			Action:   KVSyncActionDelete,
+			Revision: int(atomic.AddUint32(&kvRevision, uint32(1))),
+			Key:      "key3",
+		}
+		pkt := packageKVPacket(&kvData,
+			fmt.Sprintf("/devices/%s/kv", currentDevice))
+		pkts = append(pkts, pkt)
 	case PublishCommandCmd:
 		var cmd struct {
 			Action     string            `json:"action" binding:"required"`
@@ -296,7 +330,8 @@ func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
 	defer wg.Done()
 	for cmd := range context.cmdCh {
 		switch cmd {
-		case PublishCmd, PublishKvCmd, PublishCommandCmd:
+		case PublishCmd, PublishKvSync, PublishKvSet, PublishKvDelete,
+			PublishCommandCmd:
 			for _, client := range context.clients {
 				go sendPublish(client, cmd)
 			}

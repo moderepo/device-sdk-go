@@ -283,31 +283,54 @@ func TestMqttClientPublish(t *testing.T) {
 	DummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientPublish")
 
-	client := testConnection(ctx, t, delegate, false)
+	t.Run("Test Publish With ACK", func(t *testing.T) {
+		client := testConnection(ctx, t, delegate, false)
+		topic := fmt.Sprintf("/devices/%s/event", delegate.username)
+		event := DeviceEvent{
+			EventType: "CustomEvent",
+			EventData: map[string]interface{}{"key1": "val1"},
+			Qos:       QOSAtLeastOnce,
+		}
+		rawData, err := json.Marshal(event)
+		assert.Nil(t, err, "JSON marshaling failed")
+		packetID, err := client.Publish(ctx, event.Qos, topic, rawData)
+		assert.Nil(t, err, "Publish send failed")
 
-	topic := fmt.Sprintf("/devices/%s/event", delegate.username)
-	event := DeviceEvent{
-		EventType: "CustomEvent",
-		EventData: map[string]interface{}{"key1": "val1"},
-		Qos:       QOSAtLeastOnce,
-	}
-	rawData, err := json.Marshal(event)
-	assert.Nil(t, err, "JSON marshaling failed")
-	packetID, err := client.Publish(ctx, event.Qos, topic, rawData)
-	assert.Nil(t, err, "Publish send failed")
-
-	// Wait for the ack.
-	select {
-	case ackData := <-delegate.queueAckCh:
-		assert.Nil(t, ackData.Err, "Publish ack failed")
-		assert.Equal(t, packetID, ackData.PacketID,
-			"Publish: ID and ack id do not match")
+		// Wait for the ack.
+		select {
+		case ackData := <-delegate.queueAckCh:
+			assert.Nil(t, ackData.Err, "Publish ack failed")
+			assert.Equal(t, packetID, ackData.PacketID,
+				"Publish: ID and ack id do not match")
+		case <-ctx.Done():
+			t.Errorf("Publish response never received")
+		}
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
-	case <-ctx.Done():
-		t.Errorf("Publish response never received")
-	}
+	})
+
+	t.Run("Test Republish (ignore ACK)", func(t *testing.T) {
+		client := testConnection(ctx, t, delegate, false)
+		topic := fmt.Sprintf("/devices/%s/event", delegate.username)
+		event := DeviceEvent{
+			EventType: "CustomEvent",
+			EventData: map[string]interface{}{"key1": "val1"},
+			Qos:       QOSAtLeastOnce,
+		}
+		rawData, err := json.Marshal(event)
+		assert.Nil(t, err, "JSON marshaling failed")
+		packetID, err := client.Publish(ctx, event.Qos, topic, rawData)
+		assert.Nil(t, err, "Publish send failed")
+		repubPacketID, err := client.Republish(ctx, event.Qos, topic, rawData,
+			packetID)
+		assert.Nil(t, err, "Publish send failed")
+		assert.Equal(t, packetID, repubPacketID,
+			"Publish and Republish had different packet IDs")
+		err = client.Disconnect(ctx)
+		assert.Nil(t, err, "error disconnecting")
+	})
 	cancel()
+
 	wg.Wait()
 }
 

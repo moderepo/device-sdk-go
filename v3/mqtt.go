@@ -304,7 +304,10 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 	if client.conn != nil {
 		return errors.New("Cannot connect when already connected")
 	}
-	client.createMqttConnection()
+	if err := client.createMqttConnection(); err != nil {
+		return err
+	}
+
 	user, pwd := client.authDelegate.AuthInfo()
 	p := packet.NewConnectPacket()
 	p.Version = packet.Version311
@@ -437,7 +440,16 @@ func (client *MqttClient) PingAndWait(ctx context.Context) error {
 // error is returned immediately and the request will not be sent.
 func (client *MqttClient) Publish(ctx context.Context, qos QOSLevel,
 	topic string, data []byte) (uint16, error) {
+	return client.publishWithID(ctx, qos, topic, data, 0)
+}
 
+func (client *MqttClient) Republish(ctx context.Context, qos QOSLevel,
+	topic string, data []byte, packetID uint16) (uint16, error) {
+	return client.publishWithID(ctx, qos, topic, data, packetID)
+}
+
+func (client *MqttClient) publishWithID(ctx context.Context, qos QOSLevel,
+	topic string, data []byte, packetID uint16) (uint16, error) {
 	var pktQos byte
 	switch qos {
 	case QOSAtMostOnce:
@@ -449,7 +461,7 @@ func (client *MqttClient) Publish(ctx context.Context, qos QOSLevel,
 	}
 
 	p := packet.NewPublishPacket()
-
+	p.PacketID = packetID
 	p.Message = packet.Message{
 		Topic:   topic,
 		QOS:     pktQos,
@@ -461,7 +473,7 @@ func (client *MqttClient) Publish(ctx context.Context, qos QOSLevel,
 }
 
 // Each connect, we need to create a new mqttConnection.
-func (client *MqttClient) createMqttConnection() {
+func (client *MqttClient) createMqttConnection() error {
 	receiveQueueSize := client.confDelegate.GetReceiveQueueSize()
 	subRecvCh := make(chan MqttSubData, receiveQueueSize)
 	queueAckCh := make(chan MqttResponse, receiveQueueSize)
@@ -472,6 +484,10 @@ func (client *MqttClient) createMqttConnection() {
 	sendQueueSize := client.confDelegate.GetSendQueueSize()
 	conn := newMqttConn(tlsConfig, client.mqttHost, client.mqttPort, useTLS,
 		queueAckCh, pingAckCh, sendQueueSize)
+
+	if conn == nil {
+		return errors.New("Unable to create a socket to the server")
+	}
 
 	if client.errorDelegate != nil {
 		errCh := make(chan error, client.errorDelegate.GetErrorChannelSize())
@@ -489,6 +505,8 @@ func (client *MqttClient) createMqttConnection() {
 	go conn.runPacketWriter(client.stopWriterCh, &client.wgSend)
 	client.wgRecv.Add(1)
 	go conn.runPacketReader(&client.wgRecv)
+
+	return nil
 }
 
 // Shutting down gracefully is tricky. But, we try our best to drain the channels
@@ -654,9 +672,13 @@ func (conn *mqttConn) queuePacket(ctx context.Context,
 
 	packetID := uint16(0)
 	if p.Type() == packet.PUBLISH {
-		packetID = conn.getPacketID()
 		pubPkt := p.(*packet.PublishPacket)
-		pubPkt.PacketID = uint16(packetID)
+		if pubPkt.PacketID != 0 {
+			packetID = pubPkt.PacketID
+		} else {
+			packetID = conn.getPacketID()
+			pubPkt.PacketID = uint16(packetID)
+		}
 	}
 
 	pktSendData := packetSendData{pkt: p,
