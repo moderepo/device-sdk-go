@@ -14,6 +14,11 @@ import (
 )
 
 const (
+	DefaultUseTLS    = false
+	DefaultQueueSize = uint16(8)
+)
+
+const (
 	KVSyncActionReload = "reload"
 	KVSyncActionSet    = "set"
 	KVSyncActionDelete = "delete"
@@ -62,6 +67,7 @@ type (
 	ModeMqttDelegate struct {
 		dc            *DeviceContext
 		subscriptions map[string]MqttMsgHandler
+		UseTLS        bool
 
 		receiveQueueSize uint16
 		sendQueueSize    uint16
@@ -82,6 +88,12 @@ type (
 )
 
 var _ MqttDelegate = (*ModeMqttDelegate)(nil)
+
+func WithUseTLS(useTLS bool) func(*ModeMqttDelegate) {
+	return func(d *ModeMqttDelegate) {
+		d.UseTLS = useTLS
+	}
+}
 
 func WithReceiveQueueSize(qSize uint16) func(*ModeMqttDelegate) {
 	return func(d *ModeMqttDelegate) {
@@ -120,8 +132,9 @@ func NewModeMqttDelegate(dc *DeviceContext,
 	opts ...ModeMqttDelegateOption) *ModeMqttDelegate {
 	del := &ModeMqttDelegate{
 		dc:               dc,
-		receiveQueueSize: 8, // some default
-		sendQueueSize:    8, // some default
+		UseTLS:           DefaultUseTLS,
+		receiveQueueSize: DefaultQueueSize, // some default
+		sendQueueSize:    DefaultQueueSize, // some default
 	}
 	subs := make(map[string]MqttMsgHandler)
 	subs[fmt.Sprintf("/devices/%d/command", dc.DeviceID)] = del.handleCommandMsg
@@ -179,12 +192,13 @@ func (del *ModeMqttDelegate) runSubscriptionListener() {
 
 func (del *ModeMqttDelegate) TLSUsageAndConfiguration() (useTLS bool,
 	tlsConfig *tls.Config) {
-	// useTLS is a package level variable
-	return useTLS, del.dc.TLSConfig
+	return del.UseTLS, del.dc.TLSConfig
 }
 
 func (del *ModeMqttDelegate) AuthInfo() (username string, password string) {
-	// format as decimal
+	if del.dc.TLSClientAuth {
+		return strconv.FormatUint(del.dc.DeviceID, 10), ""
+	}
 	return strconv.FormatUint(del.dc.DeviceID, 10), del.dc.AuthToken
 }
 

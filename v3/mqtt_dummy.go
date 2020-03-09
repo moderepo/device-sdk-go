@@ -73,8 +73,25 @@ type (
 		listener net.Listener
 		clients  []*dummyClient
 		waitTime time.Duration
+		mutex    sync.Mutex
 	}
 )
+
+func (c *dummyContext) addClient(client *dummyClient) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.clients = append(c.clients, client)
+}
+
+func (c *dummyContext) removeClient(client *dummyClient) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for i, clnt := range c.clients {
+		if clnt == client {
+			c.clients[i] = nil
+		}
+	}
+}
 
 func isValidUser(user string, testUsers []string) bool {
 	for _, vUser := range testUsers {
@@ -185,6 +202,23 @@ func getResponsePacket(client *dummyClient, pktBytes []byte,
 		pkt = &packet.SubackPacket{
 			PacketID:    uint16(atomic.AddUint32(&packetID, 1)),
 			ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
+	} else if ty == packet.UNSUBSCRIBE {
+		inPkt := packet.NewUnsubscribePacket()
+		inPkt.Decode(pktBytes[0:l])
+		// Remove the subscriptions from the current subs. If we don't find it,
+		// there's no return code for this packet, so no error
+		for _, sub := range inPkt.Topics {
+			// It's a bit of work to remove the sub, so just make it empty. When
+			// we iterate later, we'll have to make sure it's not empty before
+			// we try to use it.
+			for index, currentSub := range client.subscriptions {
+				if currentSub == sub {
+					client.subscriptions[index] = ""
+				}
+			}
+		}
+		pkt = &packet.UnsubackPacket{
+			PacketID: uint16(atomic.AddUint32(&packetID, 1))}
 	} else if ty == packet.PINGREQ {
 		pkt = packet.NewPingrespPacket()
 	} else if ty == packet.DISCONNECT {
@@ -229,6 +263,9 @@ func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 	switch pubCmd {
 	case PublishCmd:
 		for _, topic := range client.subscriptions {
+			if topic == "" {
+				continue
+			}
 			// publish some data on the clients' topics. (If we want specific
 			// data, we'll have to use some new mechanism.)
 			pubPkt := packet.NewPublishPacket()
@@ -302,14 +339,8 @@ func spawnSession(context *dummyContext, conn net.Conn) {
 	client := &dummyClient{
 		conn: conn,
 	}
-	context.clients = append(context.clients, client)
-	defer func() {
-		for i, c := range context.clients {
-			if c == client {
-				context.clients[i] = nil
-			}
-		}
-	}()
+	context.addClient(client)
+	defer context.removeClient(client)
 
 	handleSession(context, client)
 }

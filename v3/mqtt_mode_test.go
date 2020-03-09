@@ -81,6 +81,80 @@ func testModeWaitForPubAck(t *testing.T, delegate *ModeMqttDelegate,
 	return 0
 }
 
+func TestModeMqttDelegate(t *testing.T) {
+	dc := &DeviceContext{
+		DeviceID:  1,
+		AuthToken: "XXXX",
+	}
+
+	extraSub := "additionalsub"
+	extraFormatSub := "additional/%d/sub"
+	expectedSubs := []string{
+		fmt.Sprintf(fmt.Sprintf("/devices/%d/command", dc.DeviceID)),
+		fmt.Sprintf(fmt.Sprintf("/devices/%d/kv", dc.DeviceID)),
+		fmt.Sprintf(extraSub),
+		fmt.Sprintf(fmt.Sprintf(extraFormatSub, dc.DeviceID))}
+
+	// Test the default and overridden values of the mode delegate
+	t.Run("TestDefaultModeMqttDelegate", func(t *testing.T) {
+		del := NewModeMqttDelegate(dc)
+
+		usage, conf := del.TLSUsageAndConfiguration()
+		// Default is not to use TSL
+		assert.Equal(t, DefaultUseTLS, usage, "Use TLS expected to be false")
+		assert.Nil(t, conf, "Expected no TLS config")
+		user, password := del.AuthInfo()
+		assert.Equal(t, fmt.Sprintf("%d", dc.DeviceID), user, "User did not match device ID")
+		assert.Equal(t, dc.AuthToken, password, "Password did not match device auth token")
+		assert.Equal(t, del.GetReceiveQueueSize(), DefaultQueueSize,
+			"Receive queue size did not match default")
+		assert.Equal(t, del.GetSendQueueSize(), DefaultQueueSize,
+			"Receive queue size did not match default")
+
+		// Just the first two subs of the expectedSubs will be found
+		for i := 0; i < 2; i++ {
+			sub := expectedSubs[i]
+			_, found := del.subscriptions[sub]
+			assert.True(t, found,
+				"Should have found %s among the subscriptions", sub)
+		}
+	})
+
+	t.Run("TestModeMqttDelegateOverrides", func(t *testing.T) {
+		skipVerify := false
+		err := dc.SetPKCS12ClientCertificate("fixtures/client1.p12", "pwd", skipVerify)
+		assert.Nil(t, err, "Failed to load certificate")
+		dc.TLSClientAuth = true
+
+		receiveQueueSize := uint16(1)
+		sendQueueSize := uint16(2)
+
+		del := NewModeMqttDelegate(dc,
+			WithUseTLS(true),
+			WithReceiveQueueSize(receiveQueueSize),
+			WithSendQueueSize(sendQueueSize),
+			WithAdditionalSubscription("additionalsub", nil),
+			WithAdditionalFormatSubscription("additional/%d/sub", nil))
+
+		usage, conf := del.TLSUsageAndConfiguration()
+		assert.True(t, usage, "Use TLS expected to be true")
+		assert.Equal(t, dc.TLSConfig, conf, "Mismatch in TLSConfg")
+		_, password := del.AuthInfo()
+		assert.Empty(t, password,
+			"Should have empty password iif TLSClientAuth is true")
+		assert.Equal(t, del.GetReceiveQueueSize(), receiveQueueSize,
+			"Receive queue size did not match set value")
+		assert.Equal(t, del.GetSendQueueSize(), sendQueueSize,
+			"Send queue size did not match set value")
+
+		for _, sub := range expectedSubs {
+			_, found := del.subscriptions[sub]
+			assert.True(t, found,
+				"Should have found %s among the subscriptions", sub)
+		}
+	})
+}
+
 func TestModeMqttClientConnection(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
