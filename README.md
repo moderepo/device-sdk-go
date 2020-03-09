@@ -30,7 +30,10 @@ The package name is `mode` (which does not match the import path). For example:
 
     import (
         "fmt"
-        "github.com/moderepo/device-sdk-go"
+        // For version 2 of the API
+        "github.com/moderepo/device-sdk-go/v2"
+        // For version 3 of the API
+        "github.com/moderepo/device-sdk-go/v3"
     )
 
     func main() {
@@ -45,12 +48,15 @@ The package name is `mode` (which does not match the import path). For example:
     }
 ```
 
-See more examples [here](https://github.com/moderepo/device-sdk-go/blob/master/examples).
+See more examples for [version 2](https://github.com/moderepo/device-sdk-go/blob/master/examples) of the API and for [version 3](https://github.com/moderepo/device-sdk-go/blob/master/v3/examples).
+
 
 
 ## Documentation
 
-See the full API documentation [here](https://godoc.org/github.com/moderepo/device-sdk-go).
+See the full API documentation
+ * [Version 2](https://godoc.org/github.com/moderepo/device-sdk-go).
+ * [Version 3](https://godoc.org/github.com/moderepo/device-sdk-go/v3).
 
 
 ## Copyright and License

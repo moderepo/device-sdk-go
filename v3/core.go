@@ -1,7 +1,25 @@
 /*
-This package provides a Go API for devices to interact with the MODE cloud.
+This is Version 3 of the package of the go API for devices to interact with the MODE cloud.
 
-TBD
+You can connect to the cloud in three steps:
+
+1. Construct a DeviceContext
+  deviceContext := &mode.DeviceContext{...}
+2. Use the DeviceContext to construct Mode's implementation of the MqttDelegate.
+  delegate := mode.NewModeMqttDelegate(...)
+3. Create a client using the delegate
+  client := mode.NewMqttClient(mqttHost, mqttPort, WithMqttDelegate(delegate))
+
+Customization and configuration are done through various delegate interfaces. For
+ convenience, there is a general delegate (MqttDelegate), as used in the example, which
+ contains all the delegate interfaces except the error delegate. The ModeMqttDelegate is
+ implemented to subscribe and receive the MQTT topics used by MODE, but the MqttClient can
+ be constructed with other implementations to communicate with other MQTT servers.
+
+Reqeusts to the cloud through the MqttClient fall in two categories: non-blocking, or
+ blocking until a response is received. Refer to the documentation for details. For
+non-blocking calls, the MqttReceiverDelegate will receive the response channels from the
+ client via the SetReceiveChannels().
 
 */
 package mode

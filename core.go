@@ -1,6 +1,8 @@
 /*
 This package provides a Go API for devices to interact with the MODE cloud.
 
+This page documents Version 2 of the API. For Version 3, visit https://godoc.org/github.com/moderepo/device-sdk-go/v3
+
 If a device wants to receive commands from and send events to the MODE cloud,
 it must start a connection session. Connection session is also required for the
 device to use the Device Data Proxy (device key-value store) feature.
@@ -8,6 +10,7 @@ device to use the Device Data Proxy (device key-value store) feature.
 Both incoming commands and outgoing events are queued. If the connection is
 disrupted, commands already in the queue will be processed. Likewise,
 events already in the queue will be delivered when the connection resumes.
+
 */
 package mode
 
