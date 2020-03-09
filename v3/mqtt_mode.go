@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	DefaultUseTLS    = false
+	DefaultUseTLS    = true
 	DefaultQueueSize = uint16(8)
 )
 

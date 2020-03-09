@@ -32,7 +32,7 @@ func newModeMqttDelegate() *ModeMqttDelegate {
 		AuthToken: "v1.XXXXXXXXX",
 	}
 
-	return NewModeMqttDelegate(dc)
+	return NewModeMqttDelegate(dc, WithUseTLS(false))
 }
 
 // Helper for some tests
@@ -100,8 +100,8 @@ func TestModeMqttDelegate(t *testing.T) {
 		del := NewModeMqttDelegate(dc)
 
 		usage, conf := del.TLSUsageAndConfiguration()
-		// Default is not to use TSL
-		assert.Equal(t, DefaultUseTLS, usage, "Use TLS expected to be false")
+		// Default is not to use TLS
+		assert.Equal(t, DefaultUseTLS, usage, "Use TLS expected to be true")
 		assert.Nil(t, conf, "Expected no TLS config")
 		user, password := del.AuthInfo()
 		assert.Equal(t, fmt.Sprintf("%d", dc.DeviceID), user, "User did not match device ID")
@@ -130,18 +130,18 @@ func TestModeMqttDelegate(t *testing.T) {
 		sendQueueSize := uint16(2)
 
 		del := NewModeMqttDelegate(dc,
-			WithUseTLS(true),
+			WithUseTLS(false),
 			WithReceiveQueueSize(receiveQueueSize),
 			WithSendQueueSize(sendQueueSize),
 			WithAdditionalSubscription("additionalsub", nil),
 			WithAdditionalFormatSubscription("additional/%d/sub", nil))
 
 		usage, conf := del.TLSUsageAndConfiguration()
-		assert.True(t, usage, "Use TLS expected to be true")
+		assert.False(t, usage, "Use TLS expected to be false")
 		assert.Equal(t, dc.TLSConfig, conf, "Mismatch in TLSConfg")
 		_, password := del.AuthInfo()
 		assert.Empty(t, password,
-			"Should have empty password iif TLSClientAuth is true")
+			"Should have empty password if TLSClientAuth is true")
 		assert.Equal(t, del.GetReceiveQueueSize(), receiveQueueSize,
 			"Receive queue size did not match set value")
 		assert.Equal(t, del.GetSendQueueSize(), sendQueueSize,
