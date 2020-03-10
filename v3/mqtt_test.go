@@ -275,6 +275,24 @@ func TestMqttClientSubscribe(t *testing.T) {
 	wg.Wait()
 }
 
+func TestMqttClientUnSubscribe(t *testing.T) {
+	// We only make sure we can send this and get a successful unsubscribe
+	// back.
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	DummyMQTTD(ctx, &wg, nil)
+	fmt.Println("TestMqttClientUnsubscribe")
+	goodDelegate := newTestMqttDelegate()
+	client := testConnection(ctx, t, goodDelegate, false)
+	assert.Nil(t, client.Unubscribe(ctx, goodDelegate.subscriptions),
+		"Failed to unsubscribe")
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
+	cancel()
+	wg.Wait()
+}
+
 func TestMqttClientPublish(t *testing.T) {
 	var wg sync.WaitGroup
 	delegate := newTestMqttDelegate()

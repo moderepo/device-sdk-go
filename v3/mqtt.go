@@ -221,14 +221,16 @@ type (
 		directSendPktCh chan packetSendData
 		queuedSendPktCh chan packetSendData
 		// Channels to respond to clients.
-		connRespCh chan MqttResponse
-		subRespCh  chan MqttResponse
-		pingRespCh chan MqttResponse
-		queueAckCh chan MqttResponse
+		connRespCh  chan MqttResponse
+		subRespCh   chan MqttResponse
+		unsubRespCh chan MqttResponse
+		pingRespCh  chan MqttResponse
+		queueAckCh  chan MqttResponse
 		// This is optional and may be nil
 		errCh chan error
 
-		mutex sync.Mutex
+		mutex       sync.Mutex
+		statusMutex sync.RWMutex
 	}
 )
 
@@ -289,7 +291,7 @@ func NewMqttClient(mqttHost string, mqttPort int,
 // IsConnected will return true if we have a successfully CONNACK'ed response.
 //
 func (client *MqttClient) IsConnected() bool {
-	return client.conn != nil && client.conn.status == ConnectedNetworkStatus
+	return client.conn != nil && client.conn.getStatus() == ConnectedNetworkStatus
 }
 
 // GetLastActivity will return the time since the last send or
@@ -324,11 +326,11 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 	client.wgRecv.Add(1)
 	resp := client.receivePacket(ctx, respChan)
 	if resp.Err != nil {
-		client.conn.status = DisconnectedNetworkStatus
+		client.conn.setStatus(DisconnectedNetworkStatus)
 		return resp.Err
 	}
 	// If we made it here, we consider ourselves connected
-	client.conn.status = ConnectedNetworkStatus
+	client.conn.setStatus(ConnectedNetworkStatus)
 
 	return nil
 }
@@ -347,7 +349,7 @@ func (client *MqttClient) Disconnect(ctx context.Context) error {
 	}()
 
 	// Maybe we want to add a Connecting/Disconnecting status?
-	client.conn.status = DefaultNetworkStatus
+	client.conn.setStatus(DefaultNetworkStatus)
 	p := packet.NewDisconnectPacket()
 	_, err := client.conn.sendPacket(ctx, p)
 	if err != nil {
@@ -379,6 +381,27 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 			QOS: packet.QOSAtMostOnce,
 		})
 	}
+
+	respChan, err := client.conn.sendPacket(ctx, p)
+	if err != nil {
+		logError("[MQTT] failed to send packet: %s", err.Error())
+		return []error{err}
+	}
+
+	client.wgRecv.Add(1)
+	resp := client.receivePacket(ctx, respChan)
+	if resp.Errs != nil {
+		return resp.Errs
+	}
+
+	return nil
+}
+
+func (client *MqttClient) Unubscribe(ctx context.Context,
+	subs []string) []error {
+	p := packet.NewUnsubscribePacket()
+	p.Topics = subs
+	p.PacketID = client.conn.getPacketID()
 
 	respChan, err := client.conn.sendPacket(ctx, p)
 	if err != nil {
@@ -524,7 +547,7 @@ func (client *MqttClient) shutdownConnection() {
 	// 4. Close the connection with the server. This will break the
 	//    packet reader out of its loop. Set to disconnected here so their
 	//    reader knows that it was not an error
-	client.conn.status = DisconnectedNetworkStatus
+	client.conn.setStatus(DisconnectedNetworkStatus)
 	client.conn.conn.Close()
 	// 5. Wait for the packet reader to finish
 	client.wgRecv.Wait()
@@ -648,8 +671,9 @@ func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 		queuedSendPktCh: make(chan packetSendData, outgoingQueueSize),
 
 		// Connection requests are blocking, so no buffer
-		connRespCh: make(chan MqttResponse),
-		subRespCh:  make(chan MqttResponse),
+		connRespCh:  make(chan MqttResponse),
+		subRespCh:   make(chan MqttResponse),
+		unsubRespCh: make(chan MqttResponse),
 
 		// These are passed to us by the client, with a buffer sized specified
 		// by the delegate, so it is the delegate's responsibility to set the
@@ -659,14 +683,26 @@ func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 	}
 }
 
+func (conn *mqttConn) setStatus(status NetworkStatus) {
+	conn.statusMutex.Lock()
+	defer conn.statusMutex.Unlock()
+	conn.status = status
+}
+
+func (conn *mqttConn) getStatus() NetworkStatus {
+	conn.statusMutex.RLock()
+	defer conn.statusMutex.RUnlock()
+	return conn.status
+}
+
 // We only queue pings (PINGREQ) and publishes (PUBLISH). Theoretically, we
 // could queue subscribes (SUBSCRIBE) since they have packet ID's like
 // publishes. But, for simplicity, those are synchronous, since, in practice,
 // those are either on startup, or, at least, on rare occasions.
 func (conn *mqttConn) queuePacket(ctx context.Context,
 	p packet.Packet) (uint16, error) {
-	if conn.status == DisconnectedNetworkStatus ||
-		conn.status == TimingOutNetworkStatus {
+	if conn.getStatus() == DisconnectedNetworkStatus ||
+		conn.getStatus() == TimingOutNetworkStatus {
 		return 0, errors.New("Connection unstable. Unable to send")
 	}
 
@@ -701,8 +737,8 @@ func (conn *mqttConn) queuePacket(ctx context.Context,
 // Called by the client to send packets to the server
 func (conn *mqttConn) sendPacket(ctx context.Context,
 	p packet.Packet) (chan MqttResponse, error) {
-	if conn.status == DisconnectedNetworkStatus ||
-		conn.status == TimingOutNetworkStatus {
+	if conn.getStatus() == DisconnectedNetworkStatus ||
+		conn.getStatus() == TimingOutNetworkStatus {
 		return nil, errors.New("Connection unstable. Unable to send")
 	}
 
@@ -832,7 +868,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 				// Server disconnected. This happens for 2 reasons:
 				// 1. We initiated a disconnect
 				// 2. we don't ping, so the server assumed we're done
-				conn.status = DisconnectedNetworkStatus
+				conn.setStatus(DisconnectedNetworkStatus)
 				logInfo("[MQTT] net.Conn disconnected: %s", err.Error())
 			} else {
 				// I/O Errors usually return this, so if it is, we can
@@ -930,6 +966,10 @@ func (conn *mqttConn) getResponseChannel(pktType packet.Type) chan MqttResponse 
 		return conn.connRespCh
 	case packet.SUBSCRIBE, packet.SUBACK:
 		return conn.subRespCh
+	case packet.UNSUBSCRIBE, packet.UNSUBACK:
+		// While using the same channel as subscribe probably wouldn't be a
+		// problem, it's just safer to use a separate channel for unsubs.
+		return conn.unsubRespCh
 	case packet.PUBLISH, packet.PUBACK:
 		return conn.queueAckCh
 	case packet.PINGREQ, packet.PINGRESP:
