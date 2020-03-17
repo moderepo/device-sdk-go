@@ -1,0 +1,22 @@
+version: 2.0
+jobs:
+  go-vet-and-test:
+    docker:
+      - image: circleci/golang:1.13.3
+    steps:
+      - checkout
+      - run:
+          name: v2
+          command: |
+            go vet ./...
+            go test ./...
+      - run:
+          name: v3
+          command: |
+            pushd v3 ; go vet ; popd
+            pushd v3 ; go test ; popd
+workflows:
+  version: 2
+  build-test-deploy:
+    jobs:
+      - go-vet-and-test

@@ -1,6 +1,6 @@
 # MODE Device SDK for Go
 
-[![GoDoc](https://godoc.org/github.com/moderepo/device-sdk-go?status.svg)](https://godoc.org/github.com/moderepo/device-sdk-go)
+[![GoDoc](https://godoc.org/github.com/moderepo/device-sdk-go/v3?status.svg)](https://godoc.org/github.com/moderepo/device-sdk-go/v3)
 
 This SDK is for anyone implementing MODE device drivers in the Go language. It is
 being released as a public Go module that provides a Go API for devices to interact with the MODE cloud.
@@ -30,10 +30,7 @@ The package name is `mode` (which does not match the import path). For example:
 
     import (
         "fmt"
-        // For version 2 of the API
-        "github.com/moderepo/device-sdk-go/v2"
-        // For version 3 of the API
-        "github.com/moderepo/device-sdk-go/v3"
+        "github.com/moderepo/device-sdk-go"
     )
 
     func main() {
@@ -48,15 +45,12 @@ The package name is `mode` (which does not match the import path). For example:
     }
 ```
 
-See more examples for [version 2](https://github.com/moderepo/device-sdk-go/blob/master/examples) of the API and for [version 3](https://github.com/moderepo/device-sdk-go/blob/master/v3/examples).
-
+See more examples [here](https://github.com/moderepo/device-sdk-go/blob/master/v3/examples).
 
 
 ## Documentation
 
-See the full API documentation
- * [Version 2](https://godoc.org/github.com/moderepo/device-sdk-go).
- * [Version 3](https://godoc.org/github.com/moderepo/device-sdk-go/v3).
+See the full API documentation [here](https://godoc.org/github.com/moderepo/device-sdk-go/v3).
 
 
 ## Copyright and License
