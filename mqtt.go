@@ -158,9 +158,15 @@ func (mc *mqttConn) subscribe(subs []mqttSubscription) error {
 		return errors.New("unexpected response")
 	}
 
-	ack := r.(*packet.SubackPacket)
+	ack, ok := r.(*packet.SubackPacket)
+	if !ok {
+		return fmt.Errorf("received unexpected packet (%v)", r)
+	}
+	return mc.registerSubscribeTopics(subs, p, ack)
+}
 
-	if ack.PacketID != p.PacketID {
+func (mc *mqttConn) registerSubscribeTopics(subs []mqttSubscription, pkt *packet.SubscribePacket, ack *packet.SubackPacket) error {
+	if ack.PacketID != pkt.PacketID {
 		logError("[MQTT] received SUBACK packet with wrong packet ID")
 		return errors.New("mismatch packet id")
 	}
@@ -181,7 +187,6 @@ func (mc *mqttConn) subscribe(subs []mqttSubscription) error {
 		logInfo("[MQTT] subscription to topic %s succeeded with QOS %v", s.topic, code)
 		mc.subs[s.topic] = s
 	}
-
 	return nil
 }
 
@@ -592,27 +597,13 @@ func (mc *mqttConn) sendSubscribeBulkDataResponse(sub *DeviceSubscribeBulkDataRe
 		mc.reportError(fmt.Errorf("event delivery timeout: %s", msg))
 
 	case ack := <-mc.suback:
-		if ack.PacketID == p.PacketID {
-			logInfo("[MQTT] received SUBACK for packet ID %d", ack.PacketID)
-
-			if len(ack.ReturnCodes) != 1 {
-				logError("[MQTT] received SUBACK packet with incorrect number of return codes: expect 1; got %d", len(ack.ReturnCodes))
-				return errors.New("invalid packet")
-			}
-
-			if ack.ReturnCodes[0] == packet.QOSFailure {
-				logError("[MQTT] subscription to topic %s rejected", topic)
-				return errors.New("subscription rejected")
-			}
-
-			logInfo("[MQTT] subscription to topic %s succeeded with QOS %v", topic, ack.ReturnCodes[0])
-			mc.subs[topic] = mqttSubscription{
-				topic:      topic,
-				msgHandler: mc.bulkDataResponseReceiver(sub.StreamID),
-			}
+		subs := []mqttSubscription{{
+			topic:      topic,
+			msgHandler: mc.bulkDataResponseReceiver(sub.StreamID),
+		}}
+		if err := mc.registerSubscribeTopics(subs, p, ack); err == nil {
 			return nil
 		}
-
 		msg := fmt.Sprintf("Received SUBACK packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).", ack.PacketID, p.PacketID)
 		logInfo("[MQTT] %s", msg)
 		mc.reportError(fmt.Errorf("event delivery unmatched Ack SUBACK Packet: %s", msg))
