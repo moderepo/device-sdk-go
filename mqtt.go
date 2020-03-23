@@ -407,7 +407,7 @@ func (mc *mqttConn) publishData(topic string, payloadObject interface{}, qos QOS
 
 	mc.outPacket <- p
 
-	logInfo("[MQTT] payload delivery to %s for packet ID %d", p.PacketID, topic)
+	logInfo("[MQTT] payload delivery to %s for packet ID %d", topic, p.PacketID)
 
 	if qos == QOSAtMostOnce {
 		return nil

@@ -240,7 +240,19 @@ func resubscribeBulkDataResponse() error {
 	logInfo("[Session] Start re-setting SubscribeBulkDataResponse")
 	defer logInfo("[Session] Finished re-setting SubscribeBulkDataResponse")
 
-	for streamID, receiver := range bulkDataResponseReceivers {
+	oldReceivers := bulkDataResponseReceivers
+	// Re-create map object
+	bulkDataResponseReceivers = map[string]BulkDataResponseReceiver{}
+	// Copy
+	for streamID, receiver := range oldReceivers {
+		bulkDataResponseReceivers[streamID] = receiver
+	}
+	// SetBulkDataResponseReceiver has side effect for bulkDataResponseReceivers map.
+	// So loop uses coped map object.
+	// And if MQTT happened error then it losts topic and receiver from map.
+	// So bulkDataResponseReceivers is created the new map object and it is copied map
+	// from old map at previous lines.
+	for streamID, receiver := range oldReceivers {
 		if err := SetBulkDataResponseReceiver(streamID, receiver); err != nil {
 			logError("[Session] Re subscriber failed to subsrive %s: %v", streamID, err)
 			return err
