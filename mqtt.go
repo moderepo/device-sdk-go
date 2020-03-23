@@ -411,7 +411,7 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
 
 	select {
-	case <-time.After(deviceEventRetryInterval):
+	case <-time.After(deviceEventTimeout):
 		msg := fmt.Sprintf("did not receive PUBACK of event delivery for packet ID %d", p.PacketID)
 		logError("[MQTT] %s", msg)
 		mc.reportError(fmt.Errorf("event delivery timeout: %s", msg))
@@ -461,7 +461,7 @@ func (mc *mqttConn) sendBulkData(b *DeviceBulkData) error {
 	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
 
 	select {
-	case <-time.After(deviceEventRetryInterval):
+	case <-time.After(deviceEventTimeout):
 		msg := fmt.Sprintf("did not receive PUBACK of bulk data delivery for packet ID %d", p.PacketID)
 		logError("[MQTT] %s", msg)
 		mc.reportError(fmt.Errorf("bulk data delivery timeout: %s", msg))
@@ -496,7 +496,7 @@ func (mc *mqttConn) writeBulkData(b *DeviceSyncedBulkData) error {
 	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
 
 	select {
-	case <-time.After(syncedBulkDataRetryInterval):
+	case <-time.After(syncedBulkDataTimeout):
 		msg := fmt.Sprintf("did not receive PUBACK of synced bulk data delivery for packet ID %d", p.PacketID)
 		logError("[MQTT] %s", msg)
 		mc.reportError(fmt.Errorf("synced bulk data delivery timeout: %s", msg))
@@ -549,7 +549,7 @@ func (mc *mqttConn) sendBulkDataRequest(b *DeviceBulkDataRequest) error {
 	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
 
 	select {
-	case <-time.After(deviceEventRetryInterval):
+	case <-time.After(deviceEventTimeout):
 		msg := fmt.Sprintf("did not receive PUBACK of event delivery for packet ID %d", p.PacketID)
 		logError("[MQTT] %s", msg)
 		mc.reportError(fmt.Errorf("event delivery timeout: %s", msg))
@@ -586,7 +586,7 @@ func (mc *mqttConn) sendSubscribeBulkDataResponse(sub *DeviceSubscribeBulkDataRe
 	mc.outPacket <- p
 
 	select {
-	case <-time.After(deviceEventRetryInterval):
+	case <-time.After(deviceEventTimeout):
 		msg := fmt.Sprintf("did not receive SUBACK of event delivery for packet ID %d", p.PacketID)
 		logError("[MQTT] %s", msg)
 		mc.reportError(fmt.Errorf("event delivery timeout: %s", msg))
