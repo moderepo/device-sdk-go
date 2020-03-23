@@ -383,33 +383,33 @@ func (mc *mqttConn) runPublisher() {
 	}
 }
 
-func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
-	var qos byte
+func (mc *mqttConn) publishData(topic string, payloadObject interface{}, qos QOSLevel) error {
+	var q byte
 
-	switch e.qos {
+	switch qos {
 	case QOSAtMostOnce:
-		qos = packet.QOSAtMostOnce
+		q = packet.QOSAtMostOnce
 	case QOSAtLeastOnce:
-		qos = packet.QOSAtLeastOnce
+		q = packet.QOSAtLeastOnce
 	default:
 		return errors.New("unsupported qos level")
 	}
 
-	payload, _ := json.Marshal(e)
+	payload, _ := json.Marshal(payloadObject)
 
 	p := packet.NewPublishPacket()
 	p.PacketID = mc.getPacketID()
 	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/event", mc.dc.DeviceID),
-		QOS:     qos,
+		Topic:   topic,
+		QOS:     q,
 		Payload: payload,
 	}
 
 	mc.outPacket <- p
 
-	logInfo("[MQTT] event delivery for packet ID %d", p.PacketID)
+	logInfo("[MQTT] payload delivery to %s for packet ID %d", p.PacketID, topic)
 
-	if e.qos == QOSAtMostOnce {
+	if qos == QOSAtMostOnce {
 		return nil
 	}
 
@@ -427,13 +427,23 @@ func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
 			return nil
 		}
 
-		msg := fmt.Sprintf("sendEvent() received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
-			ack.PacketID, p.PacketID)
+		msg := fmt.Sprintf("received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d) from %s.",
+			ack.PacketID, p.PacketID, topic)
 		logInfo("[MQTT] %s", msg)
 		mc.reportError(fmt.Errorf("event delivery unmatched Ack Packet: %s", msg))
 	}
 
 	return errors.New("event dropped")
+}
+
+func (mc *mqttConn) sendEvent(e *DeviceEvent) error {
+	topic := fmt.Sprintf("/devices/%d/event", mc.dc.DeviceID)
+	return mc.publishData(topic, e, e.qos)
+}
+
+func (mc *mqttConn) sendBulkDataRequest(b *DeviceBulkDataRequest) error {
+	topic := fmt.Sprintf("/devices/%d/bulkData/%s/request", mc.dc.DeviceID, b.StreamID)
+	return mc.publishData(topic, b, b.qos)
 }
 
 func (mc *mqttConn) sendBulkData(b *DeviceBulkData) error {
@@ -519,59 +529,6 @@ func (mc *mqttConn) writeBulkData(b *DeviceSyncedBulkData) error {
 	}
 
 	return errors.New("did not receive ack packet until timeout and bulk data dropped")
-}
-
-func (mc *mqttConn) sendBulkDataRequest(b *DeviceBulkDataRequest) error {
-	var qos byte
-
-	switch b.qos {
-	case QOSAtMostOnce:
-		qos = packet.QOSAtMostOnce
-	case QOSAtLeastOnce:
-		qos = packet.QOSAtLeastOnce
-	default:
-		return errors.New("unsupported qos level")
-	}
-
-	payload, _ := json.Marshal(b)
-
-	p := packet.NewPublishPacket()
-	p.PacketID = mc.getPacketID()
-	p.Message = packet.Message{
-		Topic:   fmt.Sprintf("/devices/%d/bulkData/%s/request", mc.dc.DeviceID, b.StreamID),
-		QOS:     qos,
-		Payload: payload,
-	}
-
-	mc.outPacket <- p
-
-	logInfo("[MQTT] bulkData request delivery for packet ID %d and requestID %s", p.PacketID, b.RequestID)
-
-	if b.qos == QOSAtMostOnce {
-		return nil
-	}
-
-	logInfo("[MQTT] waiting for PUBACK for packet ID %d", p.PacketID)
-
-	select {
-	case <-time.After(deviceEventTimeout):
-		msg := fmt.Sprintf("did not receive PUBACK of event delivery for packet ID %d", p.PacketID)
-		logError("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("event delivery timeout: %s", msg))
-
-	case ack := <-mc.puback:
-		if ack.PacketID == p.PacketID {
-			logInfo("[MQTT] received PUBACK for packet ID %d", ack.PacketID)
-			return nil
-		}
-
-		msg := fmt.Sprintf(" received packet that does not match the Ack packet ID (%d) and the expected packet ID (%d).",
-			ack.PacketID, p.PacketID)
-		logInfo("[MQTT] %s", msg)
-		mc.reportError(fmt.Errorf("event delivery unmatched Ack Packet: %s", msg))
-	}
-
-	return errors.New("event dropped")
 }
 
 func (mc *mqttConn) sendSubscribeBulkDataResponse(sub *DeviceSubscribeBulkDataResponse) error {
