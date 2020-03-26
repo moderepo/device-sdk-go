@@ -407,7 +407,8 @@ func TestMqttClientPing(t *testing.T) {
 		err := sendPing(ctx, t, client, delegate)
 		assert.NotNil(t, err, "Received expected error")
 		cmdCh <- ResetServerCmd
-		client.Disconnect(ctx)
+		err = client.Disconnect(ctx)
+		assert.NoError(t, err)
 	})
 
 	logInfo("Sending shutdown to server")
@@ -453,7 +454,9 @@ func TestMqttErrorHandling(t *testing.T) {
 			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		}
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			client.Ping(ctx)
+			if err := client.Ping(ctx); err != nil {
+				return false
+			}
 			return len(delegate.pingAckCh) == 2
 		}), "Ping response queue never filled")
 
@@ -479,13 +482,17 @@ func TestMqttErrorHandling(t *testing.T) {
 			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		}
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			client.Ping(ctx)
+			if err := client.Ping(ctx); err != nil {
+				return false
+			}
 			return len(delegate.pingAckCh) == 2
 		}), "Ping response queue never filled")
 
 		assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			client.Ping(ctx)
+			if err := client.Ping(ctx); err != nil {
+				return false
+			}
 			return len(errorDelegate.errorCh) > 0
 		}), "Error delegate  queue never filled")
 		assert.Nil(t, client.Disconnect(ctx), "Error in disconnect")
@@ -509,16 +516,22 @@ func TestMqttErrorHandling(t *testing.T) {
 			assert.Nil(t, client.Ping(ctx), "Send of ping failed")
 		}
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			client.Ping(ctx)
+			if err := client.Ping(ctx); err != nil {
+				return false
+			}
 			return len(delegate.pingAckCh) == 2
 		}), "Ping response queue never filled")
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			client.Ping(ctx)
+			if err := client.Ping(ctx); err != nil {
+				return false
+			}
 			return len(errorDelegate.errorCh) == 2
 		}), "Error delegate queue never filled")
 
 		assert.True(t, waitForCondition(ctx, timeout, func() bool {
-			client.Ping(ctx)
+			if err := client.Ping(ctx); err != nil {
+				return false
+			}
 			return len(client.TakeRemainingErrors()) > 0
 		}), "TakeRemainingErrors never populated")
 
