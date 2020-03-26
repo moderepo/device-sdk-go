@@ -93,6 +93,18 @@ func (c *dummyContext) removeClient(client *dummyClient) {
 	}
 }
 
+func (c *dummyContext) setWaitTime(t time.Duration) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.waitTime = t
+}
+
+func (c *dummyContext) getWaitTime() time.Duration {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.waitTime
+}
+
 func isValidUser(user string, testUsers []string) bool {
 	for _, vUser := range testUsers {
 		if user == vUser {
@@ -155,9 +167,9 @@ func handleSession(context *dummyContext, client *dummyClient) {
 	for keepConn {
 		// Read until command says quit or we get a disconnect
 		bytesRead, packetBytes, err := readPacket(client.conn)
-		if context.waitTime > 0 {
+		if context.getWaitTime() > 0 {
 			logInfo("[MQTTD] Pausing server...")
-			timer := time.NewTimer(context.waitTime)
+			timer := time.NewTimer(context.getWaitTime())
 			<-timer.C
 			logInfo("[MQTTD] Unpausing server...")
 		}
@@ -367,11 +379,11 @@ func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
 				go sendPublish(client, cmd)
 			}
 		case SlowdownServerCmd:
-			context.waitTime = 3 * time.Second
+			context.setWaitTime(3 * time.Second)
 		case DisconnectCmd:
 			closeConnections(context)
 		case ResetServerCmd:
-			context.waitTime = 0
+			context.setWaitTime(0)
 		case ShutdownCmd:
 			performShutdown(context)
 		}
@@ -395,6 +407,9 @@ func performShutdown(context *dummyContext) {
 }
 
 func closeConnections(context *dummyContext) {
+	context.mutex.Lock()
+	defer context.mutex.Unlock()
+
 	for _, client := range context.clients {
 		if client != nil {
 			client.conn.Close()

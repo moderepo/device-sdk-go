@@ -175,6 +175,8 @@ type (
 		lastErrors    []error
 
 		delegateSubRecvCh chan MqttSubData
+
+		mtx sync.Mutex
 	}
 
 	// Delegate for the mqqtConn to call back to the MqttClient
@@ -229,8 +231,9 @@ type (
 		// This is optional and may be nil
 		errCh chan error
 
-		mutex       sync.Mutex
-		statusMutex sync.RWMutex
+		mutex             sync.Mutex
+		statusMutex       sync.RWMutex
+		lastActivityMutex sync.RWMutex
 	}
 )
 
@@ -297,7 +300,7 @@ func (client *MqttClient) IsConnected() bool {
 // GetLastActivity will return the time since the last send or
 // receive.
 func (client *MqttClient) GetLastActivity() time.Time {
-	return client.conn.lastActivity
+	return client.conn.GetLastActivity()
 }
 
 // Connect will initiate a connection to the server. It will block until we
@@ -627,6 +630,8 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 // error delegate or the error delegate's error channel is full, we "queue"
 // errors in a slice that can be fetched.
 func (client *MqttClient) TakeRemainingErrors() []error {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
 	defer func() {
 		client.lastErrors = make([]error, 0, 5)
 	}()
@@ -634,6 +639,8 @@ func (client *MqttClient) TakeRemainingErrors() []error {
 }
 
 func (client *MqttClient) appendError(err error) {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
 	client.lastErrors = append(client.lastErrors, err)
 }
 
@@ -693,6 +700,18 @@ func (conn *mqttConn) getStatus() NetworkStatus {
 	conn.statusMutex.RLock()
 	defer conn.statusMutex.RUnlock()
 	return conn.status
+}
+
+func (conn *mqttConn) setLastActivity(t time.Time) {
+	conn.lastActivityMutex.Lock()
+	defer conn.lastActivityMutex.Unlock()
+	conn.lastActivity = t
+}
+
+func (conn *mqttConn) GetLastActivity() time.Time {
+	conn.lastActivityMutex.RLock()
+	defer conn.lastActivityMutex.RUnlock()
+	return conn.lastActivity
 }
 
 // We only queue pings (PINGREQ) and publishes (PUBLISH). Theoretically, we
@@ -864,7 +883,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 		p, err := conn.stream.Read()
 		if err != nil {
 			// Disconnect "responses" are EOF
-			if err == io.EOF || conn.status == DisconnectedNetworkStatus {
+			if err == io.EOF || conn.getStatus() == DisconnectedNetworkStatus {
 				// Server disconnected. This happens for 2 reasons:
 				// 1. We initiated a disconnect
 				// 2. we don't ping, so the server assumed we're done
@@ -888,7 +907,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 		}
 		// Wait until here to set last activity, since disconnects and timeouts
 		// should be included as activity.
-		conn.lastActivity = time.Now()
+		conn.setLastActivity(time.Now())
 		if p.Type() == packet.PUBLISH {
 			// Incoming publish, received from our subscription.
 			pubPkt := p.(*packet.PublishPacket)
@@ -908,7 +927,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 }
 
 func (conn *mqttConn) writePacket(p packet.Packet) error {
-	conn.lastActivity = time.Now()
+	conn.setLastActivity(time.Now())
 	// XXX - I've used a SetWriteDeadline() for this, even on Flush, but I've
 	// never gotten the write's to timeout. I think it's because the underlying
 	// stream is buffered. It still doesn't quite make sense, because Flush() on
