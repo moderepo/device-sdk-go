@@ -11,10 +11,9 @@ import (
 )
 
 var (
-	// My cloudmqtt.com server)
+	// mqtt dummy server
 	modeMqttHost = "localhost"
 	modeMqttPort = 1998
-	modeUseTLS   = false
 )
 
 func invalidModeMqttDelegate() *ModeMqttDelegate {
@@ -40,7 +39,7 @@ func testModeConnection(ctx context.Context, t *testing.T,
 	delegate *ModeMqttDelegate, expectError bool) *MqttClient {
 	client := NewMqttClient(modeMqttHost, modeMqttPort,
 		WithMqttDelegate(delegate))
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	err := client.Connect(ctx)
 	if expectError {
@@ -90,10 +89,10 @@ func TestModeMqttDelegate(t *testing.T) {
 	extraSub := "additionalsub"
 	extraFormatSub := "additional/%d/sub"
 	expectedSubs := []string{
-		fmt.Sprintf(fmt.Sprintf("/devices/%d/command", dc.DeviceID)),
-		fmt.Sprintf(fmt.Sprintf("/devices/%d/kv", dc.DeviceID)),
-		fmt.Sprintf(extraSub),
-		fmt.Sprintf(fmt.Sprintf(extraFormatSub, dc.DeviceID))}
+		fmt.Sprintf("/devices/%d/command", dc.DeviceID),
+		fmt.Sprintf("/devices/%d/kv", dc.DeviceID),
+		extraSub,
+		fmt.Sprintf(extraFormatSub, dc.DeviceID)}
 
 	// Test the default and overridden values of the mode delegate
 	t.Run("TestDefaultModeMqttDelegate", func(t *testing.T) {
