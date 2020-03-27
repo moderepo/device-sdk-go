@@ -65,6 +65,7 @@ type (
 	dummyClient struct {
 		conn          net.Conn
 		subscriptions []string
+		mutex         sync.Mutex
 	}
 
 	dummyContext struct {
@@ -76,6 +77,12 @@ type (
 		mutex    sync.Mutex
 	}
 )
+
+func (c *dummyClient) addSubscriptions(s string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.subscriptions = append(c.subscriptions, s)
+}
 
 func (c *dummyContext) addClient(client *dummyClient) {
 	c.mutex.Lock()
@@ -208,7 +215,7 @@ func getResponsePacket(client *dummyClient, pktBytes []byte,
 		inPkt := packet.NewSubscribePacket()
 		inPkt.Decode(pktBytes[0:l])
 		for _, sub := range inPkt.Subscriptions {
-			client.subscriptions = append(client.subscriptions, sub.Topic)
+			client.addSubscriptions(sub.Topic)
 		}
 		// Add the topics to the client
 		pkt = &packet.SubackPacket{
@@ -274,6 +281,7 @@ func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 
 	switch pubCmd {
 	case PublishCmd:
+		client.mutex.Lock() // to guard client.subscriptions
 		for _, topic := range client.subscriptions {
 			if topic == "" {
 				continue
@@ -289,6 +297,7 @@ func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 			pubPkt.PacketID = uint16(atomic.AddUint32(&packetID, 1))
 			pkts = append(pkts, pubPkt)
 		}
+		client.mutex.Unlock()
 	case PublishKvSync:
 		kvData := KeyValueSync{
 			Action:   KVSyncActionReload,
@@ -375,9 +384,11 @@ func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
 		switch cmd {
 		case PublishCmd, PublishKvSync, PublishKvSet, PublishKvDelete,
 			PublishCommandCmd:
+			context.mutex.Lock() // to guard context.clients
 			for _, client := range context.clients {
 				go sendPublish(client, cmd)
 			}
+			context.mutex.Unlock()
 		case SlowdownServerCmd:
 			context.setWaitTime(3 * time.Second)
 		case DisconnectCmd:

@@ -291,19 +291,31 @@ func NewMqttClient(mqttHost string, mqttPort int,
 // IsConnected will return true if we have a successfully CONNACK'ed response.
 //
 func (client *MqttClient) IsConnected() bool {
-	return client.conn != nil && client.conn.getStatus() == ConnectedNetworkStatus
+	return client.getConn() != nil && client.getConn().getStatus() == ConnectedNetworkStatus
+}
+
+func (client *MqttClient) setConn(c *mqttConn) {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+	client.conn = c
+}
+
+func (client *MqttClient) getConn() *mqttConn {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+	return client.conn
 }
 
 // GetLastActivity will return the time since the last send or
 // receive.
 func (client *MqttClient) GetLastActivity() time.Time {
-	return client.conn.GetLastActivity()
+	return client.getConn().GetLastActivity()
 }
 
 // Connect will initiate a connection to the server. It will block until we
 // receive a CONNACK from the server.
 func (client *MqttClient) Connect(ctx context.Context) error {
-	if client.conn != nil {
+	if client.getConn() != nil {
 		return errors.New("Cannot connect when already connected")
 	}
 	if err := client.createMqttConnection(); err != nil {
@@ -317,7 +329,7 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 	p.Password = pwd
 	p.CleanSession = true
 
-	respChan, err := client.conn.sendPacket(ctx, p)
+	respChan, err := client.getConn().sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -326,11 +338,11 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 	client.wgRecv.Add(1)
 	resp := client.receivePacket(ctx, respChan)
 	if resp.Err != nil {
-		client.conn.setStatus(DisconnectedNetworkStatus)
+		client.getConn().setStatus(DisconnectedNetworkStatus)
 		return resp.Err
 	}
 	// If we made it here, we consider ourselves connected
-	client.conn.setStatus(ConnectedNetworkStatus)
+	client.getConn().setStatus(ConnectedNetworkStatus)
 
 	return nil
 }
@@ -339,7 +351,7 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 // the server closes the connection.
 // Note: We might want to wait, but order is important here.
 func (client *MqttClient) Disconnect(ctx context.Context) error {
-	if client.conn == nil {
+	if client.getConn() == nil {
 		// nothing to disconnect. Return
 		return nil
 	}
@@ -349,9 +361,9 @@ func (client *MqttClient) Disconnect(ctx context.Context) error {
 	}()
 
 	// Maybe we want to add a Connecting/Disconnecting status?
-	client.conn.setStatus(DefaultNetworkStatus)
+	client.getConn().setStatus(DefaultNetworkStatus)
 	p := packet.NewDisconnectPacket()
-	_, err := client.conn.sendPacket(ctx, p)
+	_, err := client.getConn().sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -368,7 +380,7 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 	subs []string) []error {
 	p := packet.NewSubscribePacket()
 	p.Subscriptions = make([]packet.Subscription, 0, 10)
-	p.PacketID = client.conn.getPacketID()
+	p.PacketID = client.getConn().getPacketID()
 
 	for _, sub := range subs {
 		// We have no protection to keep you from subscribing to the same
@@ -382,7 +394,7 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 		})
 	}
 
-	respChan, err := client.conn.sendPacket(ctx, p)
+	respChan, err := client.getConn().sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return []error{err}
@@ -401,9 +413,9 @@ func (client *MqttClient) Unubscribe(ctx context.Context,
 	subs []string) []error {
 	p := packet.NewUnsubscribePacket()
 	p.Topics = subs
-	p.PacketID = client.conn.getPacketID()
+	p.PacketID = client.getConn().getPacketID()
 
-	respChan, err := client.conn.sendPacket(ctx, p)
+	respChan, err := client.getConn().sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return []error{err}
@@ -424,7 +436,7 @@ func (client *MqttClient) Unubscribe(ctx context.Context,
 func (client *MqttClient) Ping(ctx context.Context) error {
 
 	p := packet.NewPingreqPacket()
-	_, err := client.conn.queuePacket(ctx, p)
+	_, err := client.getConn().queuePacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -440,7 +452,7 @@ func (client *MqttClient) Ping(ctx context.Context) error {
 func (client *MqttClient) PingAndWait(ctx context.Context) error {
 
 	p := packet.NewPingreqPacket()
-	respChan, err := client.conn.sendPacket(ctx, p)
+	respChan, err := client.getConn().sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -492,7 +504,7 @@ func (client *MqttClient) publishWithID(ctx context.Context, qos QOSLevel,
 	}
 	logInfo("[MQTT] Publishing on topic [%s]", p.Message.Topic)
 
-	return client.conn.queuePacket(ctx, p)
+	return client.getConn().queuePacket(ctx, p)
 }
 
 // Each connect, we need to create a new mqttConnection.
@@ -518,7 +530,7 @@ func (client *MqttClient) createMqttConnection() error {
 		conn.errCh = errCh
 	}
 
-	client.conn = conn
+	client.setConn(conn)
 	conn.Receiver = client
 
 	// We want to pass our WaitGroup's to the connection reader and writer, so
@@ -542,28 +554,28 @@ func (client *MqttClient) shutdownConnection() {
 	// writes that might be sent before the done channel has bene read.
 	client.wgSend.Wait()
 	// 3. Close the channels writer channels
-	close(client.conn.directSendPktCh)
-	close(client.conn.queuedSendPktCh)
+	close(client.getConn().directSendPktCh)
+	close(client.getConn().queuedSendPktCh)
 	// 4. Close the connection with the server. This will break the
 	//    packet reader out of its loop. Set to disconnected here so their
 	//    reader knows that it was not an error
-	client.conn.setStatus(DisconnectedNetworkStatus)
-	client.conn.conn.Close()
+	client.getConn().setStatus(DisconnectedNetworkStatus)
+	client.getConn().conn.Close()
 	// 5. Wait for the packet reader to finish
 	client.wgRecv.Wait()
 	// 6. Notify the client that we are disconnecting
 	client.recvDelegate.OnClose()
 	// 6. Close the channels for handling responses
-	close(client.conn.connRespCh)
-	close(client.conn.subRespCh)
+	close(client.getConn().connRespCh)
+	close(client.getConn().subRespCh)
 	// 7. Close the channel to the client readers.
-	close(client.conn.queueAckCh)
-	close(client.conn.pingRespCh)
+	close(client.getConn().queueAckCh)
+	close(client.getConn().pingRespCh)
 	close(client.delegateSubRecvCh)
-	if client.conn.errCh != nil {
-		close(client.conn.errCh)
+	if client.getConn().errCh != nil {
+		close(client.getConn().errCh)
 	}
-	client.conn = nil
+	client.setConn(nil)
 }
 
 // Helper function called by the synchronous API to handle processing
@@ -605,7 +617,7 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 	case client.delegateSubRecvCh <- pubData:
 	default:
 		logError("Caller could not receive publish data. SubRecCh full?")
-		client.conn.sendQueueingError(nil)
+		client.getConn().sendQueueingError(nil)
 		return
 	}
 	if p.Message.QOS != packet.QOSAtMostOnce {
@@ -617,8 +629,8 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 		ctx, cancel := context.WithTimeout(context.Background(),
 			connResponseDeadline)
 		defer cancel()
-		if _, err := client.conn.queuePacket(ctx, ackPkt); err != nil {
-			client.conn.sendQueueingError(err)
+		if _, err := client.getConn().queuePacket(ctx, ackPkt); err != nil {
+			client.getConn().sendQueueingError(err)
 		}
 	}
 }
