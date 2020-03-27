@@ -190,9 +190,6 @@ type (
 		resultCh chan<- MqttResponse
 	}
 
-	// Type alias for something that we use everywhere
-	mqttSendPacketChan chan packetSendData
-
 	// Internal structure used by the client to communicate with the mqttd
 	// server. This is a thin wrapper over the mqtt_packet package.
 	mqttConn struct {
@@ -860,7 +857,10 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 	for {
 		// Set a deadline for reads to prevent blocking forever. We'll handle
 		// this error and continue looping, if appropriate
-		conn.conn.SetReadDeadline(time.Now().Add(connResponseDeadline))
+		if err := conn.conn.SetReadDeadline(time.Now().Add(connResponseDeadline)); err != nil {
+			logError("[MQTT] failed to set read deadline: %s", err.Error())
+			break
+		}
 		p, err := conn.stream.Read()
 		if err != nil {
 			// Disconnect "responses" are EOF
@@ -917,13 +917,19 @@ func (conn *mqttConn) writePacket(p packet.Packet) error {
 	// lack of an ACK on write won't result in timing out. But, in any case, we
 	// will still have a response timeout on the round trip, which might be
 	// sufficient.
-	conn.conn.SetWriteDeadline(time.Now().Add(connResponseDeadline))
+	if err := conn.conn.SetWriteDeadline(time.Now().Add(connResponseDeadline)); err != nil {
+		logError("[MQTT] failed to set write deadline: %s", err.Error())
+		return err
+	}
 	if err := conn.stream.Write(p); err != nil {
 		logError("[MQTT] failed to send %s packet: %s", p.Type(), err.Error())
 		return err
 	}
 
-	conn.conn.SetWriteDeadline(time.Now().Add(connResponseDeadline))
+	if err := conn.conn.SetWriteDeadline(time.Now().Add(connResponseDeadline)); err != nil {
+		logError("[MQTT] failed to set write deadline: %s", err.Error())
+		return err
+	}
 	if err := conn.stream.Flush(); err != nil {
 		logError("[MQTT] failed to flush %s packet: %s", p.Type(), err.Error())
 		return err

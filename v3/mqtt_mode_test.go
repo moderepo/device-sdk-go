@@ -353,7 +353,8 @@ func TestModeMqttClientReceiveKVSync(t *testing.T) {
 	goodDelegate := newModeMqttDelegate()
 	client := NewMqttClient(modeMqttHost, modeMqttPort,
 		WithMqttDelegate(goodDelegate))
-	client.Connect(ctx)
+	err := client.Connect(ctx)
+	assert.NoError(t, err)
 	// Tell the server to send a kv update
 	cmdCh <- PublishKvSync
 	// Start the listener
@@ -401,7 +402,8 @@ func TestModeMqttClientReceiveCommand(t *testing.T) {
 		WithMqttDelegate(goodDelegate))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client.Connect(ctx)
+	err := client.Connect(ctx)
+	assert.NoError(t, err)
 
 	cmdCh <- PublishCommandCmd
 	// Start the listener
