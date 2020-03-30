@@ -341,7 +341,7 @@ func TestMqttClientPublish(t *testing.T) {
 		assert.Nil(t, err, "Publish send failed")
 		repubPacketID, err := client.Republish(ctx, event.Qos, topic, rawData,
 			packetID)
-		assert.Nil(t, err, "Publish send failed")
+		assert.Nil(t, err, "Republish send failed")
 		assert.Equal(t, packetID, repubPacketID,
 			"Publish and Republish had different packet IDs")
 		err = client.Disconnect(ctx)
