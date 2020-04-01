@@ -372,8 +372,8 @@ func (client *MqttClient) Disconnect(ctx context.Context) error {
 	return nil
 }
 
-// Subscribe will query the delegate for its subscriptions via the
-// Subscriptions method. This is a synchronous call so it will block until
+// Subscribe will subscribe to the topics in subs by sending a subscribe
+// request. This is a synchronous call so it will block until
 // a response is received from the server. It will return a slice of errors
 // which will be in the same order as the subscriptions in Subscriptions().
 func (client *MqttClient) Subscribe(ctx context.Context,
@@ -409,7 +409,9 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 	return nil
 }
 
-func (client *MqttClient) Unubscribe(ctx context.Context,
+// Unsubscribe will send an unsubscribe request for the topics in subs.
+// This is a synchronous call.
+func (client *MqttClient) Unsubscribe(ctx context.Context,
 	subs []string) []error {
 	p := packet.NewUnsubscribePacket()
 	p.Topics = subs

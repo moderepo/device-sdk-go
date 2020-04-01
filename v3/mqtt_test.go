@@ -285,7 +285,7 @@ func TestMqttClientUnSubscribe(t *testing.T) {
 	fmt.Println("TestMqttClientUnsubscribe")
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(ctx, t, goodDelegate, false)
-	assert.Nil(t, client.Unubscribe(ctx, goodDelegate.subscriptions),
+	assert.Nil(t, client.Unsubscribe(ctx, goodDelegate.subscriptions),
 		"Failed to unsubscribe")
 	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
 
