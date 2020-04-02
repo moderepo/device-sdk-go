@@ -62,20 +62,23 @@ var (
 	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
 
 	// For publishing device events to cloud.
-	deviceEventRetryInterval    = time.Second * 15
-	syncedBulkDataRetryInterval = time.Second * 15
+	deviceEventTimeout    = time.Second * 15
+	syncedBulkDataTimeout = time.Second * 30
 
 	// For publishing key-value events to cloud.
 	maxKeyValueUpdateAttempts   uint = 3
 	keyValueUpdateRetryInterval      = time.Second * 5
 
 	// TBD: how much buffering should we allow?
-	eventQueueLength            = 128
-	bulkDataQueueLength         = 128
-	commandQueueLength          = 128
-	keyValueSyncQueueLength     = 128
-	keyValuePushQueueLength     = 128
-	keyValueCallbackQueueLength = 128
+	eventQueueLength                     = 128
+	bulkDataQueueLength                  = 128
+	commandQueueLength                   = 128
+	keyValueSyncQueueLength              = 128
+	keyValuePushQueueLength              = 128
+	keyValueCallbackQueueLength          = 128
+	bulkDataRequestQueueLength           = 128
+	subscribeBulkDataResponseQueueLength = 128
+	bulkDataResponseQueueLength          = 128
 )
 
 // SetRESTHostPort overrides the default REST API server host and port, and specifies
@@ -109,14 +112,14 @@ func SetErrorLogger(l *log.Logger) {
 // device event sender. These config parameters are used when sending device
 // events with QoS1 (at least once).
 func ConfigureDeviceEventSender(_ uint, retryInterval time.Duration) {
-	deviceEventRetryInterval = retryInterval
+	deviceEventTimeout = retryInterval
 }
 
 // ConfigureDeviceEventTimeout overrides the default parameters used by the
 // timeout of device event sender. These config parameters are used when sending device
 // events with QoS1 (at least once).
 func ConfigureDeviceEventTimeout(retryInterval time.Duration) {
-	deviceEventRetryInterval = retryInterval
+	deviceEventTimeout = retryInterval
 }
 
 func logInfo(format string, values ...interface{}) {
@@ -198,6 +201,31 @@ type (
 	// A callback function that is invoked when a key-value pair has been deleted.
 	// The key of the deleted key-value is passed in the argument.
 	KeyValueDeletedCallback func(*DeviceContext, string)
+
+	// DeviceBulkDataRequest is request struct of "request/response" for bulkData.
+	DeviceBulkDataRequest struct {
+		StreamID  string                 `json:"-"`
+		RequestID string                 `json:"requestId"`
+		Payload   map[string]interface{} `json:"payload"`
+		qos       QOSLevel               // not exported to serializer
+	}
+
+	// DeviceSubscribeBulkDataResponse is request of subscribing bulk data response topic.
+	DeviceSubscribeBulkDataResponse struct {
+		StreamID string
+		qos      QOSLevel
+	}
+
+	// DeviceBulkDataResponse is response struct of "request/response" for bulkData.
+	DeviceBulkDataResponse struct {
+		StreamID  string                 `json:"-"`
+		RequestID string                 `json:"requestId"`
+		Status    string                 `json:"status"`
+		Payload   map[string]interface{} `json:"payload,omitempty"`
+	}
+
+	// BulkDataResponseReceiver receive a response of a bulk data request from Stream.
+	BulkDataResponseReceiver func(*DeviceContext, *DeviceBulkDataResponse)
 )
 
 // ProvisionDevice is used for on-demand device provisioning. It takes a
