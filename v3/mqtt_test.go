@@ -271,6 +271,13 @@ func TestMqttClientSubscribe(t *testing.T) {
 	if client.Disconnect(ctx) != nil {
 		t.Errorf("error disconnecting")
 	}
+
+	if errs := client.Subscribe(ctx, goodDelegate.subscriptions); errs == nil {
+		t.Errorf("should return error if the connection is not connected")
+	} else if len(errs) != 1 || errs[0].Error() != "not connected" {
+		t.Errorf(`should return "not connected" error if the connection is not connected`)
+	}
+
 	cancel()
 	wg.Wait()
 }
@@ -288,6 +295,12 @@ func TestMqttClientUnSubscribe(t *testing.T) {
 	assert.Nil(t, client.Unsubscribe(ctx, goodDelegate.subscriptions),
 		"Failed to unsubscribe")
 	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
+	if errs := client.Unsubscribe(ctx, goodDelegate.subscriptions); errs == nil {
+		t.Errorf("should return error if the connection is not connected")
+	} else if len(errs) != 1 || errs[0].Error() != "not connected" {
+		t.Errorf(`should return "not connected" error if the connection is not connected`)
+	}
 
 	cancel()
 	wg.Wait()
@@ -325,6 +338,12 @@ func TestMqttClientPublish(t *testing.T) {
 		}
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
+
+		if _, err := client.Publish(ctx, event.Qos, topic, rawData); err == nil {
+			t.Errorf("should return error if the connection is not connected")
+		} else if err.Error() != "not connected" {
+			t.Errorf(`should return "not connected" error if the connection is not connected`)
+		}
 	})
 
 	t.Run("Test Republish (ignore ACK)", func(t *testing.T) {
@@ -346,6 +365,12 @@ func TestMqttClientPublish(t *testing.T) {
 			"Publish and Republish had different packet IDs")
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
+
+		if _, err := client.Republish(ctx, event.Qos, topic, rawData, packetID); err == nil {
+			t.Errorf("should return error if the connection is not connected")
+		} else if err.Error() != "not connected" {
+			t.Errorf(`should return "not connected" error if the connection is not connected`)
+		}
 	})
 	cancel()
 
@@ -386,6 +411,12 @@ func TestMqttClientPing(t *testing.T) {
 		assert.Nil(t, err, "ping failed")
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
+
+		if err := sendPing(ctx, t, client, delegate); err == nil {
+			t.Errorf("should return error if the connection is not connected")
+		} else if err.Error() != "not connected" {
+			t.Errorf(`should return "not connected" error if the connection is not connected`)
+		}
 	})
 
 	t.Run("Successful sync Ping", func(t *testing.T) {
@@ -396,6 +427,12 @@ func TestMqttClientPing(t *testing.T) {
 		assert.Nil(t, err, "ping failed")
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
+
+		if err := client.PingAndWait(ctx); err == nil {
+			t.Errorf("should return error if the connection is not connected")
+		} else if err.Error() != "not connected" {
+			t.Errorf(`should return "not connected" error if the connection is not connected`)
+		}
 	})
 
 	t.Run("Ping with Timeout", func(t *testing.T) {

@@ -309,6 +309,9 @@ func (client *MqttClient) getConn() *mqttConn {
 // GetLastActivity will return the time since the last send or
 // receive.
 func (client *MqttClient) GetLastActivity() time.Time {
+	if client.getConn() == nil {
+		return time.Time{}
+	}
 	return client.getConn().GetLastActivity()
 }
 
@@ -378,6 +381,10 @@ func (client *MqttClient) Disconnect(ctx context.Context) error {
 // which will be in the same order as the subscriptions in Subscriptions().
 func (client *MqttClient) Subscribe(ctx context.Context,
 	subs []string) []error {
+	if !client.IsConnected() {
+		return []error{errors.New("not connected")}
+	}
+
 	p := packet.NewSubscribePacket()
 	p.Subscriptions = make([]packet.Subscription, 0, 10)
 	p.PacketID = client.getConn().getPacketID()
@@ -413,6 +420,10 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 // This is a synchronous call.
 func (client *MqttClient) Unsubscribe(ctx context.Context,
 	subs []string) []error {
+	if !client.IsConnected() {
+		return []error{errors.New("not connected")}
+	}
+
 	p := packet.NewUnsubscribePacket()
 	p.Topics = subs
 	p.PacketID = client.getConn().getPacketID()
@@ -436,6 +447,9 @@ func (client *MqttClient) Unsubscribe(ctx context.Context,
 // call, so we will always return success if we were able to queue the message
 // for delivery. Results will be sent on the delegate's pingAckCh
 func (client *MqttClient) Ping(ctx context.Context) error {
+	if !client.IsConnected() {
+		return errors.New("not connected")
+	}
 
 	p := packet.NewPingreqPacket()
 	_, err := client.getConn().queuePacket(ctx, p)
@@ -452,6 +466,9 @@ func (client *MqttClient) Ping(ctx context.Context) error {
 // should not be listening on the pingAckCh channel since this function may
 // timeout waiting for the response an error will be returned.
 func (client *MqttClient) PingAndWait(ctx context.Context) error {
+	if !client.IsConnected() {
+		return errors.New("not connected")
+	}
 
 	p := packet.NewPingreqPacket()
 	respChan, err := client.getConn().sendPacket(ctx, p)
@@ -487,6 +504,10 @@ func (client *MqttClient) Republish(ctx context.Context, qos QOSLevel,
 
 func (client *MqttClient) publishWithID(ctx context.Context, qos QOSLevel,
 	topic string, data []byte, packetID uint16) (uint16, error) {
+	if !client.IsConnected() {
+		return 0, errors.New("not connected")
+	}
+
 	var pktQos byte
 	switch qos {
 	case QOSAtMostOnce:
