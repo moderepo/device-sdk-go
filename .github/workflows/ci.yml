@@ -16,7 +16,12 @@ jobs:
       with:
         go-version: 1.13.3
       id: go
-
+    - name: Cache go modules  
+      uses: actions/cache@v1
+      with:
+        path: ~/go/pkg/mod
+        key:  v3-go-modules
+        restore-keys: v3-go-modules
     - name: Check out code into the Go module directory
       uses: actions/checkout@v2
 
