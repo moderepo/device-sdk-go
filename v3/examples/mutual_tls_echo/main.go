@@ -17,104 +17,89 @@ import (
 )
 
 var (
-	modeMqttHost = "staging-api.corp.tinkermode.com"
+	modeMqttHost = "xxxx.corp.tinkermode.com"
 	modeMqttPort = 8883
-	modeUseTLS   = true
 )
 
-// XXX - Go back and sync this code up with the regular echo when the code stabilizes
-func pingLoop(client *mode.MqttClient, timeout time.Duration,
-	pingRecv <-chan mode.MqttResponse, gotDisconnected chan<- bool, doDisconnect <-chan bool,
-	wg *sync.WaitGroup) {
+const (
+	operationTimeout = 5 * time.Second
+)
 
-	defer func() {
-		fmt.Println("Exiting ping loop")
-		wg.Done()
-	}()
-	ticker := time.NewTicker(3 * time.Second)
+func runPingLoop(ctx context.Context, wg *sync.WaitGroup, client *mode.MqttClient) {
+	// Ping on an interval (if necessary)
+	pingTimer := time.NewTicker(2 * operationTimeout)
+	fmt.Println("[TLS Echo] start pinger loop.")
 
-	for {
-		if err := client.Ping(); err != nil {
-			gotDisconnected <- true
-			return
-		}
-
-		// Wait for the ack, or timeout
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-
-		// Block on the return channel or timeout
-		select {
-		case <-doDisconnect:
-			fmt.Println("runner told me to exit")
-			return
-		case resp := <-pingRecv:
-			// There's not really a way to return false, but, since it's bool,
-			// we'll check
-			fmt.Println("Got ping response")
-			if resp.Err != nil {
-				fmt.Println("sender closed ping channel")
-				gotDisconnected <- true
+	go func() {
+		defer wg.Done()
+		defer fmt.Println("[TLS Echo] stop pinger loop.")
+		defer pingTimer.Stop()
+		for {
+			pingCtx, pingCancel := context.WithTimeout(ctx, operationTimeout)
+			if err := client.PingAndWait(pingCtx); err != nil {
+				fmt.Printf("[TLS Echo] Failed ping %v\n", err)
 			}
-		case <-ctx.Done():
-			fmt.Println("ping timeout")
-			gotDisconnected <- true
-		}
+			pingCancel()
+			select {
+			case <-pingCtx.Done():
+			case <-pingTimer.C:
+			case <-ctx.Done():
+				return
+			}
 
-		fmt.Println("Ping sent and ack'ed")
-		// Wait for the timer to before we loop again
-		<-ticker.C
-	}
+		}
+	}()
 }
 
-func waitForAck(delegate *mode.ModeMqttDelegate) uint16 {
-	// Wait for the ack, or timeout
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Second)
-	defer cancel()
-
+func waitForAck(ctx context.Context, delegate *mode.ModeMqttDelegate) uint16 {
 	// Block on the return channel or timeout
 	select {
 	case queueResp := <-delegate.QueueAckCh:
 		if queueResp.Err != nil {
-			fmt.Printf("Queued request failed: %s\n", queueResp.Err)
+			fmt.Printf("[TLS Echo] Queued request failed: %s\n", queueResp.Err)
 		} else {
 			return queueResp.PacketID
 		}
 	case <-ctx.Done():
-		fmt.Printf("Ack response timeout: %s\n", ctx.Err())
+		fmt.Printf("[TLS Echo] Ack response timeout: %s\n", ctx.Err())
 	}
 
 	return 0
 }
 
-func receiveCommands(cmdChannel chan *mode.DeviceCommand,
-	delegate *mode.ModeMqttDelegate, client *mode.MqttClient) {
+func receiveCommands(ctx context.Context, delegate *mode.ModeMqttDelegate, client *mode.MqttClient) {
+	cmdChannel := delegate.GetCommandChannel()
+	for {
+		select {
+		case cmd := <-cmdChannel:
+			fmt.Printf("[TLS Echo][Echo] Received command: %s\n", cmd.Action)
+			switch cmd.Action {
+			case "doEcho":
+				var params struct {
+					Msg string `json:"msg"`
+				}
 
-	for cmd := range cmdChannel {
-		switch cmd.Action {
-		case "doEcho":
-			var params struct {
-				Msg string `json:"msg"`
-			}
+				if err := cmd.BindParameters(&params); err != nil {
+					fmt.Printf("[TLS Echo] Failed to bind command parameters: %s\n", err.Error())
+					return
+				}
 
-			if err := cmd.BindParameters(&params); err != nil {
-				fmt.Printf("Failed to bind command parameters: %s\n", err.Error())
-				return
+				event := mode.DeviceEvent{
+					EventType: "echo",
+					EventData: map[string]interface{}{"msg": params.Msg},
+					Qos:       mode.QOSAtLeastOnce,
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+				defer cancel()
+				_, err := client.PublishEvent(ctx, event)
+				if err != nil {
+					fmt.Printf("[TLS Echo] Failed to send event: %s\n", err.Error())
+				}
+				waitForAck(ctx, delegate)
+				fmt.Println("[TLS Echo] ACK received from echo")
 			}
-
-			event := mode.DeviceEvent{
-				EventType: "echo",
-				EventData: map[string]interface{}{"msg": params.Msg},
-				Qos:       mode.QOSAtLeastOnce,
-			}
-
-			_, err := client.PublishEvent(event)
-			if err != nil {
-				fmt.Printf("Failed to send event: %s\n", err.Error())
-			}
-			waitForAck(delegate)
-			fmt.Println("ACK received from echo")
+		case <-ctx.Done():
+			break
 		}
 	}
 }
@@ -124,49 +109,46 @@ func main() {
 
 	dc := &mode.DeviceContext{
 		DeviceID:      0000,
-		AuthToken:     "v1.XXXXXXXX",
+		AuthToken:     "",
 		TLSClientAuth: true,
 	}
 	// Set client certificate when you set TLSClientAuth to true.
 	// change this to real file name and password
-	dc.SetPKCS12ClientCertificate("fixtures/client1.p12", "pwd", true)
+	dc.SetPKCS12ClientCertificate("fixtures/client1.p12", "pwd", false)
 
-	cmdQueue := make(chan *mode.DeviceCommand, 16)
-	kvSyncQueue := make(chan *mode.KeyValueSync, 16)
-	delegate := mode.NewModeMqttDelegate(dc, cmdQueue, kvSyncQueue)
+	delegate := mode.NewModeMqttDelegate(dc)
 
-	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, delegate)
-	if err := client.Connect(); err != nil {
-		fmt.Printf("Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
+	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, mode.WithMqttDelegate(delegate))
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	if err := client.Connect(ctx); err != nil {
+		fmt.Printf("[TLS Echo] Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
 		os.Exit(1)
 	}
+	cancel()
 
-	// Start listening for the subscriptions before we subscribe and listen on
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	// Start listening for the subscriptions before we dsubscribe and listen on
 	// the channel that the listener sends to
-	go delegate.RunSubscriptionListener()
-	go receiveCommands(cmdQueue, delegate, client)
-	if err := client.Subscribe(); err != nil {
-		fmt.Printf("failed to subscribe: %s\n", err)
+	go delegate.StartSubscriptionListener()
+	go receiveCommands(loopCtx, delegate, client)
+	ctx, cancel = context.WithTimeout(context.Background(), operationTimeout)
+	if err := client.Subscribe(ctx, delegate.Subscriptions()); err != nil {
+		fmt.Printf("[TLS Echo] failed to subscribe: %s\n", err)
 	}
-
-	stopPingCh := make(chan bool)
-	pingFailCh := make(chan bool)
+	cancel()
 
 	// Run the ping loop to keep alive while we wait for the "doEcho" command
 	pingWg.Add(1)
-	go pingLoop(client, 5*time.Second, delegate.PingAckCh, pingFailCh,
-		stopPingCh, &pingWg)
+	runPingLoop(loopCtx, &pingWg, client)
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGTERM, syscall.SIGINT)
 
-	select {
-	case sig := <-c:
-		fmt.Printf("Received signal [%v]; shutting down...\n", sig)
-	case <-pingFailCh:
-		fmt.Printf("Ping failed. shutting down...\n")
-	}
-	close(stopPingCh)
+	sig := <-c
+	fmt.Printf("[TLS Echo] Received signal [%v]; shutting down...\n", sig)
+	loopCancel()
 	pingWg.Wait()
-	client.Disconnect()
+	ctx, cancel = context.WithTimeout(context.Background(), operationTimeout)
+	client.Disconnect(ctx)
+	cancel()
 }
