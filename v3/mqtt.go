@@ -553,7 +553,7 @@ func (client *MqttClient) shutdownConnection() {
 	// 1. Send close to the packetWriter goroutine
 	client.stopWriterCh <- struct{}{}
 	// 2. Wait until the done channel has been read, since there are some queued
-	// writes that might be sent before the done channel has bene read.
+	// writes that might be sent before the done channel has been read.
 	client.wgSend.Wait()
 	// 3. Close the channels writer channels
 	close(client.getConn().directSendPktCh)
@@ -731,7 +731,7 @@ func (conn *mqttConn) GetLastActivity() time.Time {
 // those are either on startup, or, at least, on rare occasions.
 func (conn *mqttConn) queuePacket(ctx context.Context,
 	p packet.Packet) (uint16, error) {
-	if conn.getStatus() == DisconnectedNetworkStatus ||
+	if conn == nil || conn.getStatus() == DisconnectedNetworkStatus ||
 		conn.getStatus() == TimingOutNetworkStatus {
 		return 0, errors.New("Connection unstable. Unable to send")
 	}
@@ -767,7 +767,7 @@ func (conn *mqttConn) queuePacket(ctx context.Context,
 // Called by the client to send packets to the server
 func (conn *mqttConn) sendPacket(ctx context.Context,
 	p packet.Packet) (chan MqttResponse, error) {
-	if conn.getStatus() == DisconnectedNetworkStatus ||
+	if conn == nil || conn.getStatus() == DisconnectedNetworkStatus ||
 		conn.getStatus() == TimingOutNetworkStatus {
 		return nil, errors.New("Connection unstable. Unable to send")
 	}

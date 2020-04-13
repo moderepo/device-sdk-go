@@ -378,6 +378,17 @@ func TestMqttClientPing(t *testing.T) {
 
 	delegate := newTestMqttDelegate()
 
+	t.Run("Ping with No Connection", func(t *testing.T) {
+		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+			WithMqttDelegate(delegate))
+		ctx, cancel := delegate.createContext()
+		defer cancel()
+		err := client.Ping(ctx)
+		assert.Error(t, err, "Expected error in ping when not connected")
+		err = client.PingAndWait(ctx)
+		assert.Error(t, err, "Expected error in ping when not connected")
+	})
+
 	t.Run("Successful Async Ping", func(t *testing.T) {
 		ctx, cancel := delegate.createContext()
 		defer cancel()
