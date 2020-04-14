@@ -90,14 +90,14 @@ func receiveCommands(ctx context.Context, delegate *mode.ModeMqttDelegate, clien
 					EventData: map[string]interface{}{"msg": params.Msg},
 					Qos:       mode.QOSAtLeastOnce,
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
-				defer cancel()
-				_, err := client.PublishEvent(ctx, event)
+				pubCtx, pubCancel := context.WithTimeout(ctx, operationTimeout)
+				_, err := client.PublishEvent(pubCtx, event)
 				if err != nil {
 					fmt.Printf("[Echo] Failed to send event: %s\n", err.Error())
 				}
-				waitForAck(ctx, delegate)
+				waitForAck(pubCtx, delegate)
 				fmt.Println("[Echo] ACK received from echo")
+				pubCancel()
 			}
 		case <-ctx.Done():
 			break
