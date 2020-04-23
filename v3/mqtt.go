@@ -941,7 +941,6 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 }
 
 func (conn *mqttConn) writePacket(p packet.Packet) error {
-	conn.setLastActivity(time.Now())
 	// XXX - I've used a SetWriteDeadline() for this, even on Flush, but I've
 	// never gotten the write's to timeout. I think it's because the underlying
 	// stream is buffered. It still doesn't quite make sense, because Flush() on
@@ -967,6 +966,12 @@ func (conn *mqttConn) writePacket(p packet.Packet) error {
 		logError("[MQTT] failed to flush %s packet: %s", p.Type(), err.Error())
 		return err
 	}
+
+	// Do not call setLastActivity here.
+	// Write will succeed without error even if the packet is lost somewhere
+	// before reaching the server.
+	// The only way to know the actual network activity is to watch the packets
+	// from the server.
 
 	return nil
 }
