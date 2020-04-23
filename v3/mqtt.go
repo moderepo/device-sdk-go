@@ -504,7 +504,6 @@ func (client *MqttClient) publishWithID(ctx context.Context, qos QOSLevel,
 		QOS:     pktQos,
 		Payload: data,
 	}
-	logInfo("[MQTT] Publishing on topic [%s]", p.Message.Topic)
 
 	return client.getConn().queuePacket(ctx, p)
 }
@@ -856,6 +855,11 @@ func (conn *mqttConn) createResponseForPacket(p packet.Packet) MqttResponse {
 			err = connAck.ReturnCode
 		}
 		return MqttResponse{Err: err}
+	case packet.UNSUBACK:
+		unsubAck := p.(*packet.UnsubackPacket)
+		// There's only a packet ID.
+		return MqttResponse{
+			PacketID: unsubAck.PacketID}
 	case packet.SUBACK:
 		subAck := p.(*packet.SubackPacket)
 		resp := MqttResponse{
@@ -909,7 +913,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 				opError := err.(*net.OpError)
 				if opError != nil {
 					if os.IsTimeout(opError.Err) {
-						// 	// No problem - read deadline just exceeded
+						// No problem - read deadline just exceeded
 						continue
 					}
 				}

@@ -51,6 +51,10 @@ var (
 	globalConf DummyConfig
 	packetID   uint32 = 1
 	kvRevision uint32 = 1
+
+	// DummyServerDelayDuration is the amount of time the server will wait before
+	// responding. This can be used to simulate a slow network
+	DummyServerDelayDuration = 3 * time.Second
 )
 
 type (
@@ -391,7 +395,7 @@ func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
 			}
 			context.clientsMtx.RUnlock()
 		case SlowdownServerCmd:
-			context.setWaitTime(3 * time.Second)
+			context.setWaitTime(DummyServerDelayDuration)
 		case DisconnectCmd:
 			closeConnections(context)
 		case ResetServerCmd:
