@@ -55,6 +55,8 @@ var (
 	// DummyServerDelayDuration is the amount of time the server will wait before
 	// responding. This can be used to simulate a slow network
 	DummyServerDelayDuration = 3 * time.Second
+
+	MqttDummyContext *DummyContext
 )
 
 type (
@@ -66,52 +68,52 @@ type (
 	}
 
 	// current connections
-	dummyClient struct {
+	DummyClient struct {
 		conn          net.Conn
-		subscriptions []string
+		Subscriptions []string
 		subsMtx       sync.RWMutex
 	}
 
-	dummyContext struct {
+	DummyContext struct {
 		ctx         context.Context
 		cmdCh       chan DummyCmd
 		listener    net.Listener
-		clients     []*dummyClient
+		Clients     []*DummyClient
 		clientsMtx  sync.RWMutex
 		waitTime    time.Duration
 		waitTimeMtx sync.RWMutex
 	}
 )
 
-func (c *dummyClient) addSubscriptions(s string) {
+func (c *DummyClient) addSubscriptions(s string) {
 	c.subsMtx.Lock()
 	defer c.subsMtx.Unlock()
-	c.subscriptions = append(c.subscriptions, s)
+	c.Subscriptions = append(c.Subscriptions, s)
 }
 
-func (c *dummyContext) addClient(client *dummyClient) {
+func (c *DummyContext) addClient(client *DummyClient) {
 	c.clientsMtx.Lock()
 	defer c.clientsMtx.Unlock()
-	c.clients = append(c.clients, client)
+	c.Clients = append(c.Clients, client)
 }
 
-func (c *dummyContext) removeClient(client *dummyClient) {
+func (c *DummyContext) removeClient(client *DummyClient) {
 	c.clientsMtx.Lock()
 	defer c.clientsMtx.Unlock()
-	for i, clnt := range c.clients {
+	for i, clnt := range c.Clients {
 		if clnt == client {
-			c.clients[i] = nil
+			c.Clients[i] = nil
 		}
 	}
 }
 
-func (c *dummyContext) setWaitTime(t time.Duration) {
+func (c *DummyContext) setWaitTime(t time.Duration) {
 	c.waitTimeMtx.Lock()
 	defer c.waitTimeMtx.Unlock()
 	c.waitTime = t
 }
 
-func (c *dummyContext) getWaitTime() time.Duration {
+func (c *DummyContext) getWaitTime() time.Duration {
 	c.waitTimeMtx.RLock()
 	defer c.waitTimeMtx.RUnlock()
 	return c.waitTime
@@ -173,7 +175,7 @@ func readPacket(conn net.Conn) (numBytes int, bytesRead []byte, err error) {
 	return numBytes, tmp, nil
 }
 
-func handleSession(context *dummyContext, client *dummyClient) {
+func handleSession(context *DummyContext, client *DummyClient) {
 	keepConn := true
 
 	for keepConn {
@@ -208,7 +210,7 @@ func handleSession(context *dummyContext, client *dummyClient) {
 	client.conn.Close()
 }
 
-func getResponsePacket(client *dummyClient, pktBytes []byte,
+func getResponsePacket(client *DummyClient, pktBytes []byte,
 	pktLen int) (pkt packet.Packet, keepConn bool) {
 	keepConn = true
 	l, ty := packet.DetectPacket(pktBytes[0:pktLen])
@@ -235,9 +237,9 @@ func getResponsePacket(client *dummyClient, pktBytes []byte,
 			// It's a bit of work to remove the sub, so just make it empty. When
 			// we iterate later, we'll have to make sure it's not empty before
 			// we try to use it.
-			for index, currentSub := range client.subscriptions {
+			for index, currentSub := range client.Subscriptions {
 				if currentSub == sub {
-					client.subscriptions[index] = ""
+					client.Subscriptions[index] = ""
 				}
 			}
 		}
@@ -278,7 +280,7 @@ func packageKVPacket(kvData *KeyValueSync, topic string) packet.Packet {
 	return kvPkt
 }
 
-func sendPublish(client *dummyClient, pubCmd DummyCmd) {
+func sendPublish(client *DummyClient, pubCmd DummyCmd) {
 	if client == nil {
 		return
 	}
@@ -287,7 +289,7 @@ func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 	switch pubCmd {
 	case PublishCmd:
 		client.subsMtx.RLock() // to guard client.subscriptions
-		for _, topic := range client.subscriptions {
+		for _, topic := range client.Subscriptions {
 			if topic == "" {
 				continue
 			}
@@ -361,8 +363,8 @@ func sendPublish(client *dummyClient, pubCmd DummyCmd) {
 	}
 }
 
-func spawnSession(context *dummyContext, conn net.Conn) {
-	client := &dummyClient{
+func spawnSession(context *DummyContext, conn net.Conn) {
+	client := &DummyClient{
 		conn: conn,
 	}
 	context.addClient(client)
@@ -371,7 +373,7 @@ func spawnSession(context *dummyContext, conn net.Conn) {
 	handleSession(context, client)
 }
 
-func runServer(wg *sync.WaitGroup, context *dummyContext, listener net.Listener) {
+func runServer(wg *sync.WaitGroup, context *DummyContext, listener net.Listener) {
 	defer wg.Done()
 	for {
 		conn, err := listener.Accept()
@@ -383,14 +385,14 @@ func runServer(wg *sync.WaitGroup, context *dummyContext, listener net.Listener)
 	}
 }
 
-func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
+func runCommandHandler(wg *sync.WaitGroup, context *DummyContext) {
 	defer wg.Done()
 	for cmd := range context.cmdCh {
 		switch cmd {
 		case PublishCmd, PublishKvSync, PublishKvSet, PublishKvDelete,
 			PublishCommandCmd:
 			context.clientsMtx.RLock() // to guard context.clients
-			for _, client := range context.clients {
+			for _, client := range context.Clients {
 				go sendPublish(client, cmd)
 			}
 			context.clientsMtx.RUnlock()
@@ -406,13 +408,13 @@ func runCommandHandler(wg *sync.WaitGroup, context *dummyContext) {
 	}
 }
 
-func runWaitForCancel(wg *sync.WaitGroup, context *dummyContext) {
+func runWaitForCancel(wg *sync.WaitGroup, context *DummyContext) {
 	defer wg.Done()
 	<-context.ctx.Done()
 	performShutdown(context)
 }
 
-func performShutdown(context *dummyContext) {
+func performShutdown(context *DummyContext) {
 	// Tells the server to not accept new connections
 	context.listener.Close()
 	closeConnections(context)
@@ -422,16 +424,16 @@ func performShutdown(context *dummyContext) {
 	}
 }
 
-func closeConnections(context *dummyContext) {
+func closeConnections(context *DummyContext) {
 	context.clientsMtx.Lock()
 	defer context.clientsMtx.Unlock()
 
-	for _, client := range context.clients {
+	for _, client := range context.Clients {
 		if client != nil {
 			client.conn.Close()
 		}
 	}
-	context.clients = nil
+	context.Clients = nil
 }
 
 // Dummy MQTT server. It will run an MQTT server as a goroutine. An optional
@@ -462,7 +464,7 @@ func DummyMQTTDWithConfig(ctx context.Context, wg *sync.WaitGroup,
 		panic(err)
 	}
 
-	context := dummyContext{
+	context := DummyContext{
 		ctx:      ctx,
 		cmdCh:    cmdCh,
 		listener: l,
@@ -480,6 +482,7 @@ func DummyMQTTDWithConfig(ctx context.Context, wg *sync.WaitGroup,
 	}
 	wg.Add(1)
 	go runServer(wg, &context, l)
+	MqttDummyContext = &context
 
 	return true
 }
