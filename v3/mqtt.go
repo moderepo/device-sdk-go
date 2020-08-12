@@ -21,7 +21,7 @@ import (
 
 const (
 	mqttConnectTimeout   = time.Second * 10
-	connResponseDeadline = time.Millisecond * 500
+	connResponseDeadline = time.Second * 10
 )
 
 var mqttDialer = &net.Dialer{Timeout: mqttConnectTimeout}
