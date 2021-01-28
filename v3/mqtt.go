@@ -329,13 +329,14 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 	p.Password = pwd
 	p.CleanSession = true
 
+	client.wgRecv.Add(1)
 	respChan, err := client.getConn().sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
+		client.wgRecv.Done()
 		return err
 	}
 
-	client.wgRecv.Add(1)
 	resp := client.receivePacket(ctx, respChan)
 	if resp.Err != nil {
 		client.getConn().setStatus(DisconnectedNetworkStatus)

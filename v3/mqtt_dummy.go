@@ -213,6 +213,13 @@ func handleSession(context *DummyContext, client *DummyClient) {
 func getResponsePacket(client *DummyClient, pktBytes []byte,
 	pktLen int) (pkt packet.Packet, keepConn bool) {
 	keepConn = true
+	// In the test cases, the server occasionally sends back the response before the client
+	// is ready. There will always be a race condition, although a round trip through the network
+	// should be plenty of time for the client to do the few things it takes to start listening
+	// for the response. But, when everything is in the same process, and the network is the
+	// loopback, the client needs a little bit more time. So, sleep for a tiny bit to give the
+	// client the time to execute a couple more instructions.
+	//time.Sleep(time.Millisecond)
 	l, ty := packet.DetectPacket(pktBytes[0:pktLen])
 	if ty == packet.CONNECT {
 		inPkt := packet.NewConnectPacket()
