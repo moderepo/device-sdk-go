@@ -687,10 +687,12 @@ func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 		// we will lose packets.
 		queuedSendPktCh: make(chan packetSendData, outgoingQueueSize),
 
-		// Connection requests are blocking, so no buffer
-		connRespCh:  make(chan MqttResponse),
-		subRespCh:   make(chan MqttResponse),
-		unsubRespCh: make(chan MqttResponse),
+		// These are synchronous requests, so we send the packet, then wait for the response. But,
+		// we create a buffer of 1, so if the response is received before we start listening
+		// to this channel, it won't be dropped
+		connRespCh:  make(chan MqttResponse, 1),
+		subRespCh:   make(chan MqttResponse, 1),
+		unsubRespCh: make(chan MqttResponse, 1),
 
 		// These are passed to us by the client, with a buffer sized specified
 		// by the delegate, so it is the delegate's responsibility to set the
