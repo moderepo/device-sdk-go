@@ -17,6 +17,7 @@ import (
 	"time"
 
 	packet "github.com/moderepo/device-sdk-go/v3/mqtt_packet"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -654,6 +655,54 @@ func (client *MqttClient) appendError(err error) {
 	client.lastErrors = append(client.lastErrors, err)
 }
 
+type flowLimitedWriter struct {
+	w io.Writer
+	onceWriteSize int
+	limiter *rate.Limiter
+}
+
+var _ io.Writer = flowLimitedWriter{}
+
+func newFlowLimitedWriter(writer io.Writer, writeInterval time.Duration, onceWriteSize int) flowLimitedWriter {
+	limiter := rate.NewLimiter(rate.Every(writeInterval), 1)
+
+	return flowLimitedWriter{
+		w:     writer,
+		onceWriteSize: onceWriteSize,
+		limiter: limiter,
+	}
+}
+
+func (f flowLimitedWriter) Write(p []byte) (int, error) {
+	remaining := p
+	total := 0
+
+	for {
+		if len(remaining) <= f.onceWriteSize {
+			n, err := f.w.Write(remaining)
+			return n+total, err
+		}
+
+		buf := remaining[0:f.onceWriteSize]
+		n, err := f.w.Write(buf)
+		if err != nil {
+			return total, err
+		}
+		if err := f.limiter.Wait(context.Background()); err != nil {
+			return total, err
+		}
+
+		total += n
+		remaining = remaining[n:]
+	}
+}
+
+var (
+	IntervalMs int
+	OnceWriteByteSize int
+	IsLimit bool
+)
+
 func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 	mqttPort int, useTLS bool, queueAckCh chan MqttResponse,
 	pingAckCh chan MqttResponse, outgoingQueueSize uint16) *mqttConn {
@@ -674,9 +723,23 @@ func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 		}
 	}
 
+	var w io.Writer = conn
+	if IsLimit {
+		if IntervalMs == 0 {
+			IntervalMs = 300
+		}
+		if OnceWriteByteSize == 0 {
+			OnceWriteByteSize = 50 * 1024
+		}
+		logInfo("===> intervalMs: %d, writeByteSize: %d", IntervalMs, OnceWriteByteSize)
+		w = newFlowLimitedWriter(conn, time.Duration(IntervalMs) * time.Millisecond, OnceWriteByteSize)
+	} else {
+		logInfo("===> no limit")
+	}
+
 	return &mqttConn{
 		conn:   conn,
-		stream: packet.NewStream(conn, conn),
+		stream: packet.NewStream(conn, w),
 		status: DefaultNetworkStatus,
 
 		// The two channels that we write packets to send. The packetWriter
