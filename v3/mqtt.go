@@ -291,7 +291,7 @@ func NewMqttClient(mqttHost string, mqttPort int,
 // IsConnected will return true if we have a successfully CONNACK'ed response.
 //
 func (client *MqttClient) IsConnected() bool {
-	return client.getConn() != nil && client.getConn().getStatus() == ConnectedNetworkStatus
+	return client.getConn() != nil && client.getStatus() == ConnectedNetworkStatus
 }
 
 func (client *MqttClient) setConn(c *mqttConn) {
@@ -309,7 +309,48 @@ func (client *MqttClient) getConn() *mqttConn {
 // GetLastActivity will return the time since the last send or
 // receive.
 func (client *MqttClient) GetLastActivity() time.Time {
-	return client.getConn().GetLastActivity()
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+	return client.conn.GetLastActivity()
+}
+
+func (client *MqttClient) sendPacket(ctx context.Context,
+	p packet.Packet) (chan MqttResponse, error) {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+	return client.conn.sendPacket(ctx, p)
+}
+
+func (client *MqttClient) setStatus(status NetworkStatus) {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+	client.conn.setStatus(status)
+}
+
+func (client *MqttClient) getStatus() NetworkStatus {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+	return client.conn.getStatus()
+}
+
+func (client *MqttClient) getPacketID() uint16 {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+	return client.conn.getPacketID()
+}
+
+func (client *MqttClient) queuePacket(ctx context.Context,
+	p packet.Packet) (uint16, error) {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+
+	return client.conn.queuePacket(ctx, p)
+}
+func (client *MqttClient) sendQueueingError(err error) {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+
+	client.conn.sendQueueingError(err)
 }
 
 // Connect will initiate a connection to the server. It will block until we
@@ -329,7 +370,7 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 	p.Password = pwd
 	p.CleanSession = true
 
-	respChan, err := client.getConn().sendPacket(ctx, p)
+	respChan, err := client.sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -338,11 +379,11 @@ func (client *MqttClient) Connect(ctx context.Context) error {
 	client.wgRecv.Add(1)
 	resp := client.receivePacket(ctx, respChan)
 	if resp.Err != nil {
-		client.getConn().setStatus(DisconnectedNetworkStatus)
+		client.setStatus(DisconnectedNetworkStatus)
 		return resp.Err
 	}
 	// If we made it here, we consider ourselves connected
-	client.getConn().setStatus(ConnectedNetworkStatus)
+	client.setStatus(ConnectedNetworkStatus)
 
 	return nil
 }
@@ -361,9 +402,9 @@ func (client *MqttClient) Disconnect(ctx context.Context) error {
 	}()
 
 	// Maybe we want to add a Connecting/Disconnecting status?
-	client.getConn().setStatus(DefaultNetworkStatus)
+	client.setStatus(DefaultNetworkStatus)
 	p := packet.NewDisconnectPacket()
-	_, err := client.getConn().sendPacket(ctx, p)
+	_, err := client.sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -380,7 +421,7 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 	subs []string) []error {
 	p := packet.NewSubscribePacket()
 	p.Subscriptions = make([]packet.Subscription, 0, 10)
-	p.PacketID = client.getConn().getPacketID()
+	p.PacketID = client.getPacketID()
 
 	for _, sub := range subs {
 		// We have no protection to keep you from subscribing to the same
@@ -394,7 +435,7 @@ func (client *MqttClient) Subscribe(ctx context.Context,
 		})
 	}
 
-	respChan, err := client.getConn().sendPacket(ctx, p)
+	respChan, err := client.sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return []error{err}
@@ -415,9 +456,9 @@ func (client *MqttClient) Unsubscribe(ctx context.Context,
 	subs []string) []error {
 	p := packet.NewUnsubscribePacket()
 	p.Topics = subs
-	p.PacketID = client.getConn().getPacketID()
+	p.PacketID = client.getPacketID()
 
-	respChan, err := client.getConn().sendPacket(ctx, p)
+	respChan, err := client.sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return []error{err}
@@ -438,7 +479,7 @@ func (client *MqttClient) Unsubscribe(ctx context.Context,
 func (client *MqttClient) Ping(ctx context.Context) error {
 
 	p := packet.NewPingreqPacket()
-	_, err := client.getConn().queuePacket(ctx, p)
+	_, err := client.queuePacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -454,7 +495,7 @@ func (client *MqttClient) Ping(ctx context.Context) error {
 func (client *MqttClient) PingAndWait(ctx context.Context) error {
 
 	p := packet.NewPingreqPacket()
-	respChan, err := client.getConn().sendPacket(ctx, p)
+	respChan, err := client.sendPacket(ctx, p)
 	if err != nil {
 		logError("[MQTT] failed to send packet: %s", err.Error())
 		return err
@@ -505,7 +546,7 @@ func (client *MqttClient) publishWithID(ctx context.Context, qos QOSLevel,
 		Payload: data,
 	}
 
-	return client.getConn().queuePacket(ctx, p)
+	return client.queuePacket(ctx, p)
 }
 
 // Each connect, we need to create a new mqttConnection.
@@ -548,6 +589,9 @@ func (client *MqttClient) createMqttConnection() error {
 // Shutting down gracefully is tricky. But, we try our best to drain the channels
 // and avoid any panics.
 func (client *MqttClient) shutdownConnection() {
+	client.mtx.Lock()
+	defer client.mtx.Unlock()
+
 	// We skip encapsulation of the connection class so the steps are clear
 	// 1. Send close to the packetWriter goroutine
 	client.stopWriterCh <- struct{}{}
@@ -555,28 +599,28 @@ func (client *MqttClient) shutdownConnection() {
 	// writes that might be sent before the done channel has been read.
 	client.wgSend.Wait()
 	// 3. Close the channels writer channels
-	close(client.getConn().directSendPktCh)
-	close(client.getConn().queuedSendPktCh)
+	close(client.conn.directSendPktCh)
+	close(client.conn.queuedSendPktCh)
 	// 4. Close the connection with the server. This will break the
 	//    packet reader out of its loop. Set to disconnected here so their
 	//    reader knows that it was not an error
-	client.getConn().setStatus(DisconnectedNetworkStatus)
-	client.getConn().conn.Close()
+	client.conn.setStatus(DisconnectedNetworkStatus)
+	client.conn.conn.Close()
 	// 5. Wait for the packet reader to finish
 	client.wgRecv.Wait()
 	// 6. Notify the client that we are disconnecting
 	client.recvDelegate.OnClose()
 	// 6. Close the channels for handling responses
-	close(client.getConn().connRespCh)
-	close(client.getConn().subRespCh)
+	close(client.conn.connRespCh)
+	close(client.conn.subRespCh)
 	// 7. Close the channel to the client readers.
-	close(client.getConn().queueAckCh)
-	close(client.getConn().pingRespCh)
+	close(client.conn.queueAckCh)
+	close(client.conn.pingRespCh)
 	close(client.delegateSubRecvCh)
-	if client.getConn().errCh != nil {
-		close(client.getConn().errCh)
+	if client.conn.errCh != nil {
+		close(client.conn.errCh)
 	}
-	client.setConn(nil)
+	client.conn = nil
 }
 
 // Helper function called by the synchronous API to handle processing
@@ -618,7 +662,7 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 	case client.delegateSubRecvCh <- pubData:
 	default:
 		logError("Caller could not receive publish data. SubRecCh full?")
-		client.getConn().sendQueueingError(nil)
+		client.sendQueueingError(nil)
 		return
 	}
 	if p.Message.QOS != packet.QOSAtMostOnce {
@@ -630,8 +674,9 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 		ctx, cancel := context.WithTimeout(context.Background(),
 			connResponseDeadline)
 		defer cancel()
-		if _, err := client.getConn().queuePacket(ctx, ackPkt); err != nil {
-			client.getConn().sendQueueingError(err)
+		if _, err := client.queuePacket(ctx, ackPkt); err != nil {
+			logError("[MQTT] Queueing error on handlePubReceive %+v", err)
+			client.sendQueueingError(err)
 		}
 	}
 }
@@ -709,8 +754,8 @@ func (conn *mqttConn) setStatus(status NetworkStatus) {
 }
 
 func (conn *mqttConn) getStatus() NetworkStatus {
-	conn.statusMutex.RLock()
-	defer conn.statusMutex.RUnlock()
+	//statusMutex.RLock()
+	//defer statusMutex.RUnlock()
 	return conn.status
 }
 
@@ -825,12 +870,14 @@ func (conn *mqttConn) runPacketWriter(stopWriterCh chan struct{},
 			if err != nil {
 				// If there was an error sending, we can notify the caller
 				// immediately.
+				logError("[MQTT] Error occurred on runPacketWriter %v", err)
 				select {
 				case resultCh <- MqttResponse{
 					PacketID: pktID,
 					Err:      err,
 				}:
 				default:
+					logError("[MQTT] Queueing error on runPacketWriter %+v", err)
 					conn.sendQueueingError(err)
 				}
 			}
@@ -937,9 +984,11 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 			// packet data and send it to the appropriate channel
 			respData := conn.createResponseForPacket(p)
 			respCh := conn.getResponseChannel(p.Type())
+			logInfo("[MQTT] respCh len: %d", len(respCh))
 			select {
 			case respCh <- respData:
 			default:
+				logInfo("[MQTT] Queueing error as nil (p.Type: %s / respData: %v)", p.Type(), respData)
 				conn.sendQueueingError(nil)
 			}
 		}
