@@ -176,7 +176,8 @@ type (
 
 		delegateSubRecvCh chan MqttSubData
 
-		mtx sync.Mutex
+		connMtx  sync.Mutex
+		errorMtx sync.Mutex
 	}
 
 	// Delegate for the mqqtConn to call back to the MqttClient
@@ -295,60 +296,60 @@ func (client *MqttClient) IsConnected() bool {
 }
 
 func (client *MqttClient) setConn(c *mqttConn) {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 	client.conn = c
 }
 
 func (client *MqttClient) getConn() *mqttConn {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 	return client.conn
 }
 
 // GetLastActivity will return the time since the last send or
 // receive.
 func (client *MqttClient) GetLastActivity() time.Time {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 	return client.conn.GetLastActivity()
 }
 
 func (client *MqttClient) sendPacket(ctx context.Context,
 	p packet.Packet) (chan MqttResponse, error) {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 	return client.conn.sendPacket(ctx, p)
 }
 
 func (client *MqttClient) setStatus(status NetworkStatus) {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 	client.conn.setStatus(status)
 }
 
 func (client *MqttClient) getStatus() NetworkStatus {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 	return client.conn.getStatus()
 }
 
 func (client *MqttClient) getPacketID() uint16 {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 	return client.conn.getPacketID()
 }
 
 func (client *MqttClient) queuePacket(ctx context.Context,
 	p packet.Packet) (uint16, error) {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 
 	return client.conn.queuePacket(ctx, p)
 }
 func (client *MqttClient) sendQueueingError(err error) {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 
 	client.conn.sendQueueingError(err)
 }
@@ -589,8 +590,8 @@ func (client *MqttClient) createMqttConnection() error {
 // Shutting down gracefully is tricky. But, we try our best to drain the channels
 // and avoid any panics.
 func (client *MqttClient) shutdownConnection() {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
 
 	// We skip encapsulation of the connection class so the steps are clear
 	// 1. Send close to the packetWriter goroutine
@@ -685,8 +686,8 @@ func (client *MqttClient) handlePubReceive(p *packet.PublishPacket,
 // error delegate or the error delegate's error channel is full, we "queue"
 // errors in a slice that can be fetched.
 func (client *MqttClient) TakeRemainingErrors() []error {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.errorMtx.Lock()
+	defer client.errorMtx.Unlock()
 	defer func() {
 		client.lastErrors = make([]error, 0, 5)
 	}()
@@ -694,8 +695,8 @@ func (client *MqttClient) TakeRemainingErrors() []error {
 }
 
 func (client *MqttClient) appendError(err error) {
-	client.mtx.Lock()
-	defer client.mtx.Unlock()
+	client.errorMtx.Lock()
+	defer client.errorMtx.Unlock()
 	client.lastErrors = append(client.lastErrors, err)
 }
 
@@ -984,11 +985,10 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 			// packet data and send it to the appropriate channel
 			respData := conn.createResponseForPacket(p)
 			respCh := conn.getResponseChannel(p.Type())
-			logInfo("[MQTT] respCh len: %d", len(respCh))
 			select {
 			case respCh <- respData:
 			default:
-				logInfo("[MQTT] Queueing error as nil (p.Type: %s / respData: %v)", p.Type(), respData)
+				logInfo("[MQTT] Queueing error as nil (p.Type: %s / respData: %+v)", p.Type(), respData)
 				conn.sendQueueingError(nil)
 			}
 		}
