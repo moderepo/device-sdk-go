@@ -755,8 +755,8 @@ func (conn *mqttConn) setStatus(status NetworkStatus) {
 }
 
 func (conn *mqttConn) getStatus() NetworkStatus {
-	//statusMutex.RLock()
-	//defer statusMutex.RUnlock()
+	conn.statusMutex.Lock()
+	defer conn.statusMutex.Unlock()
 	return conn.status
 }
 
