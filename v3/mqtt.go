@@ -292,7 +292,9 @@ func NewMqttClient(mqttHost string, mqttPort int,
 // IsConnected will return true if we have a successfully CONNACK'ed response.
 //
 func (client *MqttClient) IsConnected() bool {
-	return client.getConn() != nil && client.getStatus() == ConnectedNetworkStatus
+	client.connMtx.Lock()
+	defer client.connMtx.Unlock()
+	return client.conn != nil && client.conn.getStatus() == ConnectedNetworkStatus
 }
 
 func (client *MqttClient) setConn(c *mqttConn) {
@@ -755,8 +757,8 @@ func (conn *mqttConn) setStatus(status NetworkStatus) {
 }
 
 func (conn *mqttConn) getStatus() NetworkStatus {
-	conn.statusMutex.Lock()
-	defer conn.statusMutex.Unlock()
+	conn.statusMutex.RLock()
+	defer conn.statusMutex.RUnlock()
 	return conn.status
 }
 
