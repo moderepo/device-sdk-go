@@ -212,6 +212,7 @@ func handleSession(context *DummyContext, client *DummyClient) {
 				logError("[MQTTD] Error writing packet to client on handleSession: %s", err)
 				// write error is likely a missing client, so we end the
 				// connection
+				keepConn = false
 			}
 		}
 		if !keepConn {
@@ -222,6 +223,7 @@ func handleSession(context *DummyContext, client *DummyClient) {
 	client.conn.Close()
 }
 func parsePacket(client *DummyClient, ty packet.Type, pktBytes []byte) (pkt packet.Packet, keepConn bool) {
+	keepConn = true
 	if ty == packet.CONNECT {
 		inPkt := packet.NewConnectPacket()
 		inPkt.Decode(pktBytes)
@@ -388,7 +390,7 @@ func sendPublish(client *DummyClient, pubCmd DummyCmd) {
 		<-timer.C
 
 		if err := writePacket(client.conn, pkt, true); err != nil {
-			logInfo("[MQTTD] Error writing packet to client on sendPublish: %s", err)
+			logError("[MQTTD] Error writing packet to client on sendPublish: %s", err)
 		}
 	}
 }
