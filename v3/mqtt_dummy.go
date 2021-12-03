@@ -176,10 +176,9 @@ func readPacket(conn net.Conn) (bytesRead []byte, err error) {
 }
 
 func handleSession(context *DummyContext, client *DummyClient) {
-	keepConn := true
 	var remain []byte
 
-	for keepConn {
+	for {
 		// Read until command says quit or we get a disconnect
 		packetBytes, err := readPacket(client.conn)
 		if context.getWaitTime() > 0 {
@@ -191,7 +190,6 @@ func handleSession(context *DummyContext, client *DummyClient) {
 
 		if err != nil {
 			logError("[MQTTD] Error reading packet from stream: %s", err)
-			//keepConn = false
 			// we can't continue without a packet from the client
 			break
 		}
@@ -202,6 +200,7 @@ func handleSession(context *DummyContext, client *DummyClient) {
 		}
 
 		var respPkts []packet.Packet
+		var keepConn bool
 		respPkts, remain, keepConn = getResponsePacket(client, packetBytes)
 
 		for _, respPkt := range respPkts {
@@ -213,8 +212,10 @@ func handleSession(context *DummyContext, client *DummyClient) {
 				logError("[MQTTD] Error writing packet to client on handleSession: %s", err)
 				// write error is likely a missing client, so we end the
 				// connection
-				keepConn = false
 			}
+		}
+		if !keepConn {
+			break
 		}
 	}
 	logInfo("[MQTTD] closing connection")
@@ -283,7 +284,9 @@ func getResponsePacket(client *DummyClient, pktBytes []byte) ([]packet.Packet, [
 		if len(tmp) < l {
 			return packets, tmp, true
 		}
-		pkt, _ := parsePacket(client, ty, tmp[0:l])
+		pkt, ok := parsePacket(client, ty, tmp[0:l])
+		keepConn = ok
+
 		packets = append(packets, pkt)
 		if len(tmp) <= l {
 			break
