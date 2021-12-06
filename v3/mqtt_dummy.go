@@ -160,27 +160,27 @@ func writePacket(conn net.Conn, pkt packet.Packet, bigPacket bool) error {
 	return nil
 }
 
-func readPacket(conn net.Conn) (numBytes int, bytesRead []byte, err error) {
+func readPacket(conn net.Conn) (bytesRead []byte, err error) {
 	tmp := make([]byte, 256)
-	numBytes, err = conn.Read(tmp)
+	numBytes, err := conn.Read(tmp)
 	if err != nil {
 		if err == io.EOF {
 			// EOF means client closed the connection. We treat this as a
 			// normal operation.
-			return numBytes, tmp[0:1], nil
+			return tmp[0:numBytes], nil
 		}
 		logError("[MQTTD] Error reading packet from client: %s", err)
-		return 0, nil, err
+		return []byte{}, err
 	}
-	return numBytes, tmp, nil
+	return tmp[0:numBytes], nil
 }
 
 func handleSession(context *DummyContext, client *DummyClient) {
-	keepConn := true
+	var remain []byte
 
-	for keepConn {
+	for {
 		// Read until command says quit or we get a disconnect
-		bytesRead, packetBytes, err := readPacket(client.conn)
+		packetBytes, err := readPacket(client.conn)
 		if context.getWaitTime() > 0 {
 			logInfo("[MQTTD] Pausing server...")
 			timer := time.NewTimer(context.getWaitTime())
@@ -190,37 +190,47 @@ func handleSession(context *DummyContext, client *DummyClient) {
 
 		if err != nil {
 			logError("[MQTTD] Error reading packet from stream: %s", err)
-			keepConn = false
 			// we can't continue without a packet from the client
 			break
 		}
-		var respPkt packet.Packet
-		respPkt, keepConn = getResponsePacket(client, packetBytes, bytesRead)
 
-		if respPkt != nil {
+		packetBytes = append(remain, packetBytes...)
+		if len(packetBytes) <= 0 {
+			continue
+		}
+
+		var respPkts []packet.Packet
+		var keepConn bool
+		respPkts, remain, keepConn = getResponsePacket(client, packetBytes)
+
+		for _, respPkt := range respPkts {
+			logInfo("[MQTTD] writePacket on handleSession %+v", respPkt)
+			if respPkt == nil {
+				continue
+			}
 			if err := writePacket(client.conn, respPkt, false); err != nil {
-				logError("[MQTTD] Error writing packet to client: %s", err)
+				logError("[MQTTD] Error writing packet to client on handleSession: %s", err)
 				// write error is likely a missing client, so we end the
 				// connection
 				keepConn = false
 			}
 		}
+		if !keepConn {
+			break
+		}
 	}
 	logInfo("[MQTTD] closing connection")
 	client.conn.Close()
 }
-
-func getResponsePacket(client *DummyClient, pktBytes []byte,
-	pktLen int) (pkt packet.Packet, keepConn bool) {
+func parsePacket(client *DummyClient, ty packet.Type, pktBytes []byte) (pkt packet.Packet, keepConn bool) {
 	keepConn = true
-	l, ty := packet.DetectPacket(pktBytes[0:pktLen])
 	if ty == packet.CONNECT {
 		inPkt := packet.NewConnectPacket()
-		inPkt.Decode(pktBytes[0:l])
+		inPkt.Decode(pktBytes)
 		pkt, keepConn = doConnect(inPkt)
 	} else if ty == packet.SUBSCRIBE {
 		inPkt := packet.NewSubscribePacket()
-		inPkt.Decode(pktBytes[0:l])
+		inPkt.Decode(pktBytes)
 		for _, sub := range inPkt.Subscriptions {
 			client.addSubscriptions(sub.Topic)
 		}
@@ -230,7 +240,7 @@ func getResponsePacket(client *DummyClient, pktBytes []byte,
 			ReturnCodes: []byte{packet.QOSAtMostOnce, packet.QOSAtMostOnce}}
 	} else if ty == packet.UNSUBSCRIBE {
 		inPkt := packet.NewUnsubscribePacket()
-		inPkt.Decode(pktBytes[0:l])
+		inPkt.Decode(pktBytes)
 		// Remove the subscriptions from the current subs. If we don't find it,
 		// there's no return code for this packet, so no error
 		for _, sub := range inPkt.Topics {
@@ -252,7 +262,7 @@ func getResponsePacket(client *DummyClient, pktBytes []byte,
 		keepConn = false
 	} else if ty == packet.PUBLISH {
 		inPkt := packet.NewPublishPacket()
-		inPkt.Decode(pktBytes[0:l])
+		inPkt.Decode(pktBytes)
 		// If it's QOS 1, create an ack packet.
 		if inPkt.Message.QOS == packet.QOSAtLeastOnce {
 			pubAck := packet.NewPubackPacket()
@@ -264,6 +274,28 @@ func getResponsePacket(client *DummyClient, pktBytes []byte,
 	}
 
 	return pkt, keepConn
+
+}
+
+func getResponsePacket(client *DummyClient, pktBytes []byte) ([]packet.Packet, []byte, bool) {
+	keepConn := true
+	var packets []packet.Packet
+	tmp := pktBytes
+	for {
+		l, ty := packet.DetectPacket(tmp)
+		if len(tmp) < l {
+			return packets, tmp, true
+		}
+		pkt, ok := parsePacket(client, ty, tmp[0:l])
+		keepConn = ok
+
+		packets = append(packets, pkt)
+		if len(tmp) <= l {
+			break
+		}
+		tmp = tmp[l:]
+	}
+	return packets, []byte{}, keepConn
 }
 
 func packageKVPacket(kvData *KeyValueSync, topic string) packet.Packet {
@@ -358,7 +390,7 @@ func sendPublish(client *DummyClient, pubCmd DummyCmd) {
 		<-timer.C
 
 		if err := writePacket(client.conn, pkt, true); err != nil {
-			logError("[MQTTD] Error writing packet to client: %s", err)
+			logError("[MQTTD] Error writing packet to client on sendPublish: %s", err)
 		}
 	}
 }
