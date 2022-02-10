@@ -271,6 +271,7 @@ func WithMqttDelegate(delegate MqttDelegate) func(*MqttClient) {
 // not connected, and you need to create a new client to reconnect.
 func NewMqttClient(mqttHost string, mqttPort int,
 	dels ...func(*MqttClient)) *MqttClient {
+	fmt.Println("--------------------------------------------------- start!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 	client := &MqttClient{
 		mqttHost:   mqttHost,
 		mqttPort:   mqttPort,
@@ -968,7 +969,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 						continue
 					}
 				}
-				logError("[MQTT] failed to read packet: %s", err.Error())
+				logError("[MQTT] failed to read packet: %v", err)
 			}
 			// The signal to the caller that disconnect was complete is the
 			// exiting of this function (and wg.Done())
