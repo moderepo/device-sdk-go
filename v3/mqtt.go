@@ -962,8 +962,7 @@ func (conn *mqttConn) runPacketReader(wg *sync.WaitGroup) {
 			} else {
 				// I/O Errors usually return this, so if it is, we can
 				// figure out what to do next
-				opError := err.(*net.OpError)
-				if opError != nil {
+				if opError, ok := err.(*net.OpError); ok {
 					if os.IsTimeout(opError.Err) {
 						// No problem - read deadline just exceeded
 						continue
