@@ -271,7 +271,6 @@ func WithMqttDelegate(delegate MqttDelegate) func(*MqttClient) {
 // not connected, and you need to create a new client to reconnect.
 func NewMqttClient(mqttHost string, mqttPort int,
 	dels ...func(*MqttClient)) *MqttClient {
-	fmt.Println("--------------------------------------------------- start!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 	client := &MqttClient{
 		mqttHost:   mqttHost,
 		mqttPort:   mqttPort,
