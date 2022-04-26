@@ -17,6 +17,7 @@ import (
 	"time"
 
 	packet "github.com/moderepo/device-sdk-go/v3/mqtt_packet"
+	"github.com/moderepo/device-sdk-go/v3/websocket"
 )
 
 const (
@@ -164,6 +165,7 @@ type (
 	MqttClient struct {
 		mqttHost      string
 		mqttPort      int
+		useWebSocket  bool
 		authDelegate  MqttAuthDelegate
 		recvDelegate  MqttReceiverDelegate
 		confDelegate  MqttConfigDelegate
@@ -264,6 +266,12 @@ func WithMqttDelegate(delegate MqttDelegate) func(*MqttClient) {
 		c.authDelegate = delegate
 		c.recvDelegate = delegate
 		c.confDelegate = delegate
+	}
+}
+
+func WithUseWebSocket(b bool) func(client *MqttClient) {
+	return func(c *MqttClient) {
+		c.useWebSocket = b
 	}
 }
 
@@ -562,7 +570,7 @@ func (client *MqttClient) createMqttConnection() error {
 	client.delegateSubRecvCh = subRecvCh
 	useTLS, tlsConfig := client.authDelegate.TLSUsageAndConfiguration()
 	sendQueueSize := client.confDelegate.GetSendQueueSize()
-	conn := newMqttConn(tlsConfig, client.mqttHost, client.mqttPort, useTLS,
+	conn := newMqttConn(tlsConfig, client.mqttHost, client.mqttPort, useTLS, client.useWebSocket,
 		queueAckCh, pingAckCh, sendQueueSize)
 
 	if conn == nil {
@@ -703,13 +711,23 @@ func (client *MqttClient) appendError(err error) {
 }
 
 func newMqttConn(tlsConfig *tls.Config, mqttHost string,
-	mqttPort int, useTLS bool, queueAckCh chan MqttResponse,
+	mqttPort int, useTLS bool, useWebSocket bool, queueAckCh chan MqttResponse,
 	pingAckCh chan MqttResponse, outgoingQueueSize uint16) *mqttConn {
 
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
 	var conn net.Conn
 	var err error
-	if useTLS {
+
+	if useWebSocket {
+		network := "wss"
+		if !useTLS {
+			network = "ws"
+		}
+		if conn, err = websocket.Dial(network, addr); err != nil {
+			logError("WebSocket dialer failed: %s", err.Error())
+			return nil
+		}
+	} else if useTLS {
 		if conn, err = tls.DialWithDialer(mqttDialer, "tcp", addr,
 			tlsConfig); err != nil {
 			logError("MQTT TLS dialer failed: %s", err.Error())
