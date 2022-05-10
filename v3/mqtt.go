@@ -723,7 +723,7 @@ func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 		if !useTLS {
 			network = "ws"
 		}
-		if conn, err = websocket.Dial(network, addr); err != nil {
+		if conn, err = websocket.Dial(network, addr, tlsConfig); err != nil {
 			logError("WebSocket dialer failed: %s", err.Error())
 			return nil
 		}

@@ -2,8 +2,10 @@ package websocket
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"net"
+	"net/http"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -67,9 +69,15 @@ func (c Conn) SetDeadline(t time.Time) error {
 }
 
 // Dial creates a new WebSocket connection.
-func Dial(network, addr string) (net.Conn, error) {
+func Dial(network, addr string, tlsConfig *tls.Config) (net.Conn, error) {
+	dialer := &websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:  tlsConfig,
+	}
+
 	urlStr := fmt.Sprintf("%s://%s", network, addr)
-	c, _, err := websocket.DefaultDialer.Dial(urlStr, nil)
+	c, _, err := dialer.Dial(urlStr, nil)
 	if err != nil {
 		return nil, err
 	}

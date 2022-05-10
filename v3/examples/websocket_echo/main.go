@@ -18,8 +18,12 @@ import (
 
 var (
 	// Set these to the mode server
-	modeMqttHost = "localhost"
-	modeMqttPort = 21883
+	modeRestHost = "localhost"
+	modeRestPort = 7002
+
+	modeMqttHost    = "localhost"
+	modeMqttWSPort  = 21883
+	modeMqttWSSPort = 28883
 )
 
 const (
@@ -112,13 +116,39 @@ func main() {
 		AuthToken: "v1.xxxxxxxx",
 	}
 
-	delegate := mode.NewModeMqttDelegate(dc)
-	delegate.UseTLS = false
+	mode.SetRESTHostPort(modeRestHost, modeRestPort, true)
+	if info, err := dc.GetInfo(); err != nil {
+		fmt.Printf("[Echo] Failed to get device info: %v\n", err)
+		os.Exit(1)
+	} else {
+		fmt.Printf("[Echo] Device info: %v\n", info)
+	}
 
-	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, mode.WithMqttDelegate(delegate), mode.WithUseWebSocket(true))
+	delegate := mode.NewModeMqttDelegate(dc)
+
+	// WS example
+	delegate.UseTLS = false
+	port := modeMqttWSPort
+
+	//// WSS example
+	//delegate.UseTLS = true
+	//port := modeMqttWSSPort
+
+	//// WSS with client certificate example
+	//// A client certificate must have device ID in the common name. The common name format is `device-[0-9]*` (e.g. device-123).
+	//// Also, PKCS12 file should be base64 encoded (e.g. openssl enc -e -base64 -in client.p12 -out client.b64).
+	//port := modeMqttWSSPort
+	//dc = &mode.DeviceContext{} // Since client certificate contains device ID, we don't need to set device ID to device context.
+	//delegate = mode.NewModeMqttDelegate(dc)
+	//if err := dc.SetPKCS12ClientCertificate("client.b64", "pwd", false); err != nil {
+	//	fmt.Printf("[Echo] Failed to set client certificate: %v\n", err)
+	//	os.Exit(1)
+	//}
+
+	client := mode.NewMqttClient(modeMqttHost, port, mode.WithMqttDelegate(delegate), mode.WithUseWebSocket(true))
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	if err := client.Connect(ctx); err != nil {
-		fmt.Printf("[Echo] Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
+		fmt.Printf("[Echo] Failed to connect to %s:%d\n", modeMqttHost, port)
 		os.Exit(1)
 	}
 	cancel()
