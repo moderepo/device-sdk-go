@@ -711,7 +711,7 @@ func (client *MqttClient) appendError(err error) {
 }
 
 func newMqttConn(tlsConfig *tls.Config, mqttHost string,
-	mqttPort int, useTLS bool, useWebSocket bool, queueAckCh chan MqttResponse,
+	mqttPort int, useTLS, useWebSocket bool, queueAckCh chan MqttResponse,
 	pingAckCh chan MqttResponse, outgoingQueueSize uint16) *mqttConn {
 
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
