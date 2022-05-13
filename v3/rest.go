@@ -22,6 +22,7 @@ var (
 	httpTransport = &http.Transport{
 		MaxIdleConnsPerHost: defaultHTTPKeepAliveMaxConn,
 		IdleConnTimeout:     defaultHTTPKeepAliveTimeout,
+		Proxy:               http.ProxyFromEnvironment,
 	}
 
 	httpClient = &http.Client{
