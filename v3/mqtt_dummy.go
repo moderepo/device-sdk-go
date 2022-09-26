@@ -85,10 +85,33 @@ type (
 	}
 )
 
-func (c *DummyClient) addSubscriptions(s string) {
+func (c *DummyClient) findSubscription(s string) int {
+	for index, sub := range c.Subscriptions {
+		if sub == s {
+			return index
+		}
+	}
+	return -1
+}
+
+func (c *DummyClient) addSubscription(s string) {
 	c.subsMtx.Lock()
 	defer c.subsMtx.Unlock()
-	c.Subscriptions = append(c.Subscriptions, s)
+	subIndex := c.findSubscription(s)
+	if subIndex == -1 {
+		c.Subscriptions = append(c.Subscriptions, s)
+	}
+}
+
+func (c *DummyClient) removeSubscription(s string) {
+	c.subsMtx.Lock()
+	defer c.subsMtx.Unlock()
+
+	subIndex := c.findSubscription(s)
+	if subIndex != -1 {
+		c.Subscriptions = append(c.Subscriptions[:subIndex],
+			c.Subscriptions[subIndex+1:]...)
+	}
 }
 
 func (c *DummyContext) addClient(client *DummyClient) {
@@ -232,7 +255,7 @@ func parsePacket(client *DummyClient, ty packet.Type, pktBytes []byte) (pkt pack
 		inPkt := packet.NewSubscribePacket()
 		inPkt.Decode(pktBytes)
 		for _, sub := range inPkt.Subscriptions {
-			client.addSubscriptions(sub.Topic)
+			client.addSubscription(sub.Topic)
 		}
 		// Add the topics to the client
 		pkt = &packet.SubackPacket{
@@ -244,14 +267,7 @@ func parsePacket(client *DummyClient, ty packet.Type, pktBytes []byte) (pkt pack
 		// Remove the subscriptions from the current subs. If we don't find it,
 		// there's no return code for this packet, so no error
 		for _, sub := range inPkt.Topics {
-			// It's a bit of work to remove the sub, so just make it empty. When
-			// we iterate later, we'll have to make sure it's not empty before
-			// we try to use it.
-			for index, currentSub := range client.Subscriptions {
-				if currentSub == sub {
-					client.Subscriptions[index] = ""
-				}
-			}
+			client.removeSubscription(sub)
 		}
 		pkt = &packet.UnsubackPacket{
 			PacketID: uint16(atomic.AddUint32(&packetID, 1))}
