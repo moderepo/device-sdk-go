@@ -1,6 +1,6 @@
 module github.com/moderepo/device-sdk-go/v2
 
-go 1.12
+go 1.21
 
 require (
 	github.com/stretchr/testify v1.4.0
