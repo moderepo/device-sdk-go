@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     name: go-vet-and-test
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
     steps:
 
     - name: Set up Go
