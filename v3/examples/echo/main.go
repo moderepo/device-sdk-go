@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/moderepo/device-sdk-go/v3"
+	mode "github.com/moderepo/device-sdk-go/v3"
 )
 
 var (
@@ -139,7 +139,7 @@ func main() {
 	pingWg.Add(1)
 	runPingLoop(loopCtx, &pingWg, client)
 
-	c := make(chan os.Signal)
+	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGTERM, syscall.SIGINT)
 
 	sig := <-c
