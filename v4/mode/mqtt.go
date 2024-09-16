@@ -81,13 +81,12 @@ type (
 	}
 
 	// MqttAuthDelegate methods provide the security and authentication
-	// information to start a connection to the MqttServer
+	// information to start a connection to the MQTT server
 	MqttAuthDelegate interface {
-		// TLSUsageAndConfiguration returns the tls usage and configuration. If useTLS is false, a nil
-		// tlsConfig should be returned.
-		TLSUsageAndConfiguration() (useTLS bool, tlsConfig *tls.Config)
 		// AuthInfo returns authentication information
 		AuthInfo() (username string, password string)
+		// UseTLS indicates whether TLS should be used to connect to the server.
+		UseTLS() bool
 	}
 
 	// MqttReceiverDelegate methods allow the MqttClient to communicate
@@ -561,9 +560,9 @@ func (client *MqttClient) createMqttConnection() error {
 	pingAckCh := make(chan MqttResponse, receiveQueueSize)
 	client.recvDelegate.SetReceiveChannels(subRecvCh, queueAckCh, pingAckCh)
 	client.delegateSubRecvCh = subRecvCh
-	useTLS, tlsConfig := client.authDelegate.TLSUsageAndConfiguration()
+	useTLS := client.authDelegate.UseTLS()
 	sendQueueSize := client.confDelegate.GetSendQueueSize()
-	conn := newMqttConn(tlsConfig, client.mqttHost, client.mqttPort, useTLS, client.useWebSocket,
+	conn := newMqttConn(client.mqttHost, client.mqttPort, useTLS, client.useWebSocket,
 		queueAckCh, pingAckCh, sendQueueSize)
 
 	if conn == nil {
@@ -703,9 +702,8 @@ func (client *MqttClient) appendError(err error) {
 	client.lastErrors = append(client.lastErrors, err)
 }
 
-func newMqttConn(tlsConfig *tls.Config, mqttHost string,
-	mqttPort int, useTLS, useWebSocket bool, queueAckCh chan MqttResponse,
-	pingAckCh chan MqttResponse, outgoingQueueSize uint16) *mqttConn {
+func newMqttConn(mqttHost string, mqttPort int, useTLS, useWebSocket bool,
+	queueAckCh chan MqttResponse, pingAckCh chan MqttResponse, outgoingQueueSize uint16) *mqttConn {
 
 	addr := fmt.Sprintf("%s:%d", mqttHost, mqttPort)
 	var conn net.Conn
@@ -716,13 +714,12 @@ func newMqttConn(tlsConfig *tls.Config, mqttHost string,
 		if !useTLS {
 			network = "ws"
 		}
-		if conn, err = websocket.Dial(network, addr, tlsConfig); err != nil {
+		if conn, err = websocket.Dial(network, addr); err != nil {
 			logError("WebSocket dialer failed: %s", err.Error())
 			return nil
 		}
 	} else if useTLS {
-		if conn, err = tls.DialWithDialer(mqttDialer, "tcp", addr,
-			tlsConfig); err != nil {
+		if conn, err = tls.DialWithDialer(mqttDialer, "tcp", addr, nil); err != nil {
 			logError("MQTT TLS dialer failed: %s", err.Error())
 			return nil
 		}

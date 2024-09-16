@@ -2,7 +2,6 @@ package mode
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -39,8 +38,8 @@ type (
 	}
 )
 
-func (*TestMqttAuthDelegate) TLSUsageAndConfiguration() (useTLS bool, tlsConfig *tls.Config) {
-	return true, nil
+func (*TestMqttAuthDelegate) UseTLS() bool {
+	return true
 }
 
 func (*TestMqttAuthDelegate) AuthInfo() (username string, password string) {
@@ -115,9 +114,8 @@ func invalidTestMqttDelegate() TestMqttDelegate {
 	}
 }
 
-func (del *TestMqttDelegate) TLSUsageAndConfiguration() (useTLS bool,
-	tlsConfig *tls.Config) {
-	return useTLS, nil
+func (del *TestMqttDelegate) UseTLS() bool {
+	return false
 }
 
 func (del *TestMqttDelegate) AuthInfo() (username string, password string) {
@@ -352,8 +350,7 @@ func TestMqttClientPublish(t *testing.T) {
 	wg.Wait()
 }
 
-func sendPing(ctx context.Context, t *testing.T, client *MqttClient,
-	del *TestMqttDelegate) error {
+func sendPing(ctx context.Context, client *MqttClient, del *TestMqttDelegate) error {
 	if err := client.Ping(ctx); err != nil {
 		return err
 	}
@@ -393,7 +390,7 @@ func TestMqttClientPing(t *testing.T) {
 		ctx, cancel := delegate.createContext()
 		defer cancel()
 		client := testConnection(ctx, t, delegate, false)
-		err := sendPing(ctx, t, client, delegate)
+		err := sendPing(ctx, client, delegate)
 		assert.Nil(t, err, "ping failed")
 		err = client.Disconnect(ctx)
 		assert.Nil(t, err, "error disconnecting")
@@ -415,7 +412,7 @@ func TestMqttClientPing(t *testing.T) {
 		client := testConnection(ctx, t, delegate, false)
 		cmdCh <- SlowdownServerCmd
 		// Wait for the ack, but it will time out
-		err := sendPing(ctx, t, client, delegate)
+		err := sendPing(ctx, client, delegate)
 		assert.Error(t, err, "Received expected error")
 		// XXX - investigate why the test server is still slow. For now, ignore
 		// the possible error on disconnect.

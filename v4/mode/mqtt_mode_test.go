@@ -98,10 +98,9 @@ func TestModeMqttDelegate(t *testing.T) {
 	t.Run("TestDefaultModeMqttDelegate", func(t *testing.T) {
 		del := NewModeMqttDelegate(dc)
 
-		usage, conf := del.TLSUsageAndConfiguration()
+		useTLS := del.UseTLS()
 		// Default is not to use TLS
-		assert.Equal(t, DefaultUseTLS, usage, "Use TLS expected to be true")
-		assert.Nil(t, conf, "Expected no TLS config")
+		assert.Equal(t, DefaultUseTLS, useTLS, "Use TLS expected to be true")
 		user, password := del.AuthInfo()
 		assert.Equal(t, fmt.Sprintf("%d", dc.DeviceID), user, "User did not match device ID")
 		assert.Equal(t, dc.AuthToken, password, "Password did not match device auth token")
@@ -120,11 +119,6 @@ func TestModeMqttDelegate(t *testing.T) {
 	})
 
 	t.Run("TestModeMqttDelegateOverrides", func(t *testing.T) {
-		skipVerify := false
-		err := dc.SetPKCS12ClientCertificate("fixtures/client1.p12", "pwd", skipVerify)
-		assert.Nil(t, err, "Failed to load certificate")
-		dc.TLSClientAuth = true
-
 		receiveQueueSize := uint16(1)
 		sendQueueSize := uint16(2)
 
@@ -135,12 +129,8 @@ func TestModeMqttDelegate(t *testing.T) {
 			WithAdditionalSubscription("additionalsub", nil),
 			WithAdditionalFormatSubscription("additional/%d/sub", nil))
 
-		usage, conf := del.TLSUsageAndConfiguration()
-		assert.False(t, usage, "Use TLS expected to be false")
-		assert.Equal(t, dc.TLSConfig, conf, "Mismatch in TLSConfg")
-		_, password := del.AuthInfo()
-		assert.Empty(t, password,
-			"Should have empty password if TLSClientAuth is true")
+		useTLS := del.UseTLS()
+		assert.False(t, useTLS, "Use TLS expected to be false")
 		assert.Equal(t, del.GetReceiveQueueSize(), receiveQueueSize,
 			"Receive queue size did not match set value")
 		assert.Equal(t, del.GetSendQueueSize(), sendQueueSize,

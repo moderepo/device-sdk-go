@@ -6,9 +6,12 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,13 +19,10 @@ import (
 	"github.com/moderepo/device-sdk-go/v4/mode"
 )
 
-var (
-	// Set these to the mode server (or start the mqtt_dummy)
-	modeMqttHost = "xxxxx.corp.tinkermode.com"
-	modeMqttPort = 1883
-)
-
 const (
+	defaultMQTTHost  = "mqtt.tinkermode.com"
+	defaultMQTTPort  = 1883
+	defaultMQTTSPort = 8883
 	operationTimeout = 5 * time.Second
 )
 
@@ -106,35 +106,66 @@ func receiveCommands(ctx context.Context, delegate *mode.ModeMqttDelegate, clien
 }
 
 func main() {
-	var pingWg sync.WaitGroup
+	var modeMqttHost string
+	var useTLS bool
 
-	dc := &mode.DeviceContext{
-		DeviceID:  0000,
-		AuthToken: "v1.xxxxxxxx",
+	flag.StringVar(&modeMqttHost, "h", defaultMQTTHost, "hostname of MQTT server")
+	flag.BoolVar(&useTLS, "s", false, "use secure connection")
+	flag.Parse()
+
+	if flag.NArg() < 2 {
+		fmt.Println("Usage: echo <device_id> <auth_token>")
+		os.Exit(1)
 	}
 
-	delegate := mode.NewModeMqttDelegate(dc)
-	delegate.UseTLS = false
+	deviceID, err := strconv.ParseUint(flag.Arg(0), 10, 64)
+	if err != nil || deviceID == 0 {
+		fmt.Printf("Invalid device id: %s\n", flag.Arg(0))
+		os.Exit(1)
+	}
+
+	authToken := strings.TrimSpace(flag.Arg(1))
+	if len(authToken) == 0 {
+		fmt.Printf("Auth token required\n")
+		os.Exit(1)
+	}
+
+	dc := &mode.DeviceContext{
+		DeviceID:  deviceID,
+		AuthToken: authToken,
+	}
+
+	delegate := mode.NewModeMqttDelegate(dc, mode.WithUseTLS(useTLS))
+
+	var modeMqttPort int
+	if useTLS {
+		modeMqttPort = defaultMQTTSPort
+	} else {
+		modeMqttPort = defaultMQTTPort
+	}
 
 	client := mode.NewMqttClient(modeMqttHost, modeMqttPort, mode.WithMqttDelegate(delegate))
+
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
 	if err := client.Connect(ctx); err != nil {
 		fmt.Printf("[Echo] Failed to connect to %s:%d\n", modeMqttHost, modeMqttPort)
 		os.Exit(1)
 	}
-	cancel()
 
 	loopCtx, loopCancel := context.WithCancel(context.Background())
-	// Start listening for the subscriptions before we dsubscribe and listen on
+	// Start listening for the subscriptions before we subscribe and listen on
 	// the channel that the listener sends to
 	go delegate.StartSubscriptionListener()
 	go receiveCommands(loopCtx, delegate, client)
+
 	ctx, cancel = context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
 	if err := client.Subscribe(ctx, delegate.Subscriptions()); err != nil {
 		fmt.Printf("[Echo] failed to subscribe: %s\n", err)
 	}
-	cancel()
 
+	var pingWg sync.WaitGroup
 	// Run the ping loop to keep alive while we wait for the "doEcho" command
 	pingWg.Add(1)
 	runPingLoop(loopCtx, &pingWg, client)
@@ -146,7 +177,8 @@ func main() {
 	fmt.Printf("[Echo] Received signal [%v]; shutting down...\n", sig)
 	loopCancel()
 	pingWg.Wait()
+
 	ctx, cancel = context.WithTimeout(context.Background(), operationTimeout)
-	client.Disconnect(ctx)
-	cancel()
+	defer cancel()
+	_ = client.Disconnect(ctx)
 }

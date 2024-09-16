@@ -27,19 +27,13 @@ MqttReceiverDelegate.SetReceiveChannels. Refer to the documentation for details.
 package mode
 
 import (
-	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"os"
 	"time"
-
-	"golang.org/x/crypto/pkcs12"
 )
 
 const (
-	sdkVersion      = "3.0"
+	sdkVersion      = "4.0"
 	defaultRESTHost = "api.tinkermode.com"
 )
 
@@ -65,10 +59,8 @@ type (
 	// If you want to use client certificate instead of AuthToken,
 	// set TLSClientAuth to true and call SetPKCS12ClientCertificate function.
 	DeviceContext struct {
-		DeviceID      uint64
-		AuthToken     string
-		TLSClientAuth bool
-		TLSConfig     *tls.Config
+		DeviceID  uint64
+		AuthToken string
 	}
 
 	// DeviceInfo contains the key information fetched from the MODE API.
@@ -147,49 +139,6 @@ func (dc *DeviceContext) GetInfo() (*DeviceInfo, error) {
 	}
 
 	return d, nil
-}
-
-// SetPKCS12ClientCertificate set PKCS#12 client certificate to device context.
-// Set fileName and password of the certificate. If insecureSkipVerify is true,
-// TLS accepts any certificate presented by the server and any host name in
-// that certificate. This should be used only for testing.
-func (dc *DeviceContext) SetPKCS12ClientCertificate(fileName string, password string, insecureSkipVerify bool) error {
-	p12Content, err := os.ReadFile(fileName)
-	if err != nil {
-		logError("Read PKCS#12 file failed: %v", err)
-		return err
-	}
-
-	p12, err := base64.StdEncoding.DecodeString(string(p12Content))
-	if err != nil {
-		logError("PKCS#12 file should be base64 encoded: %v", err)
-		return err
-	}
-
-	blocks, err := pkcs12.ToPEM(p12, password)
-	if err != nil {
-		logError("Read PKCS#12 file failed: %v", err)
-		return err
-	}
-
-	var pemData []byte
-	for _, b := range blocks {
-		pemData = append(pemData, pem.EncodeToMemory(b)...)
-	}
-
-	// then use PEM data for tls to construct tls certificate:
-	cert, err := tls.X509KeyPair(pemData, pemData)
-	if err != nil {
-		logError("Parse X509KeyPair failed: %v", err)
-		return err
-	}
-
-	dc.TLSConfig = &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: insecureSkipVerify,
-	}
-
-	return nil
 }
 
 func (cmd *DeviceCommand) String() string {

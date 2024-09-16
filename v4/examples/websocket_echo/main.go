@@ -1,14 +1,17 @@
 /*
-In this example, the device sends an "echo" event whenever it receives a "doEcho"
+In this example, the device connects to the MQTT server via WebSocket. It sends an "echo" event whenever it receives a "doEcho"
 command.
 */
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,18 +19,11 @@ import (
 	"github.com/moderepo/device-sdk-go/v4/mode"
 )
 
-var (
-	// Set these to the mode server
-	modeRestHost = "localhost"
-	modeRestPort = 7002
-
-	modeMqttHost    = "localhost"
-	modeMqttWSPort  = 21883
-	modeMqttWSSPort = 28883
-)
-
 const (
-	operationTimeout = 5 * time.Second
+	defaultMQTTHost    = "mqtt.tinkermode.com"
+	defaultMQTTWSPort  = 80
+	defaultMQTTWSSPort = 443
+	operationTimeout   = 5 * time.Second
 )
 
 func runPingLoop(ctx context.Context, wg *sync.WaitGroup, client *mode.MqttClient) {
@@ -109,60 +105,65 @@ func receiveCommands(ctx context.Context, delegate *mode.ModeMqttDelegate, clien
 }
 
 func main() {
-	var pingWg sync.WaitGroup
+	var modeMqttHost string
+	var useTLS bool
+
+	flag.StringVar(&modeMqttHost, "h", defaultMQTTHost, "hostname of MQTT server")
+	flag.BoolVar(&useTLS, "s", false, "use secure connection")
+	flag.Parse()
+
+	if flag.NArg() < 2 {
+		fmt.Println("Usage: websocket_echo <device_id> <auth_token>")
+		os.Exit(1)
+	}
+
+	deviceID, err := strconv.ParseUint(flag.Arg(0), 10, 64)
+	if err != nil || deviceID == 0 {
+		fmt.Printf("Invalid device id: %s\n", flag.Arg(0))
+		os.Exit(1)
+	}
+
+	authToken := strings.TrimSpace(flag.Arg(1))
+	if len(authToken) == 0 {
+		fmt.Printf("Auth token required\n")
+		os.Exit(1)
+	}
 
 	dc := &mode.DeviceContext{
-		DeviceID:  0000,
-		AuthToken: "v1.xxxxxxxx",
+		DeviceID:  deviceID,
+		AuthToken: authToken,
 	}
 
-	mode.SetRESTHostPort(modeRestHost, modeRestPort, true)
-	if info, err := dc.GetInfo(); err != nil {
-		fmt.Printf("[Echo] Failed to get device info: %v\n", err)
-		os.Exit(1)
+	delegate := mode.NewModeMqttDelegate(dc, mode.WithUseTLS(useTLS))
+
+	var port int
+	if useTLS {
+		port = defaultMQTTWSSPort
 	} else {
-		fmt.Printf("[Echo] Device info: %v\n", info)
+		port = defaultMQTTWSPort
 	}
-
-	delegate := mode.NewModeMqttDelegate(dc)
-
-	// WS example
-	delegate.UseTLS = false
-	port := modeMqttWSPort
-
-	//// WSS example
-	//delegate.UseTLS = true
-	//port := modeMqttWSSPort
-
-	//// WSS with client certificate example
-	//// A client certificate must have device ID in the common name. The common name format is `device-[0-9]*` (e.g. device-123).
-	//// Also, PKCS12 file should be base64 encoded (e.g. openssl enc -e -base64 -in client.p12 -out client.b64).
-	//port := modeMqttWSSPort
-	//dc = &mode.DeviceContext{} // Since client certificate contains device ID, we don't need to set device ID to device context.
-	//delegate = mode.NewModeMqttDelegate(dc)
-	//if err := dc.SetPKCS12ClientCertificate("client.b64", "pwd", false); err != nil {
-	//	fmt.Printf("[Echo] Failed to set client certificate: %v\n", err)
-	//	os.Exit(1)
-	//}
 
 	client := mode.NewMqttClient(modeMqttHost, port, mode.WithMqttDelegate(delegate), mode.WithUseWebSocket(true))
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
 	if err := client.Connect(ctx); err != nil {
 		fmt.Printf("[Echo] Failed to connect to %s:%d\n", modeMqttHost, port)
 		os.Exit(1)
 	}
-	cancel()
 
 	loopCtx, loopCancel := context.WithCancel(context.Background())
 	// Start listening for the subscriptions before we subscribe and listen on
 	// the channel that the listener sends to
 	go delegate.StartSubscriptionListener()
 	go receiveCommands(loopCtx, delegate, client)
+
 	ctx, cancel = context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
 	if err := client.Subscribe(ctx, delegate.Subscriptions()); err != nil {
 		fmt.Printf("[Echo] failed to subscribe: %s\n", err)
 	}
-	cancel()
+
+	var pingWg sync.WaitGroup
 
 	// Run the ping loop to keep alive while we wait for the "doEcho" command
 	pingWg.Add(1)
@@ -175,7 +176,8 @@ func main() {
 	fmt.Printf("[Echo] Received signal [%v]; shutting down...\n", sig)
 	loopCancel()
 	pingWg.Wait()
+
 	ctx, cancel = context.WithTimeout(context.Background(), operationTimeout)
-	client.Disconnect(ctx)
-	cancel()
+	defer cancel()
+	_ = client.Disconnect(ctx)
 }

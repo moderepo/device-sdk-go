@@ -3,7 +3,6 @@ package mode
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,10 +34,10 @@ type (
 	KeyValueSync struct {
 		Action   string      `json:"action"`
 		Revision int         `json:"rev"`
-		Key      string      `json:"key"`
-		Value    interface{} `json:"value"`
-		NumItems int         `json:"numItems"`
-		Items    []*KeyValue `json:"items"`
+		Key      string      `json:"key,omitempty"`
+		Value    interface{} `json:"value,omitempty"`
+		NumItems int         `json:"numItems,omitempty"`
+		Items    []*KeyValue `json:"items,omitempty"`
 	}
 
 	// KeyValue represents a key-value pair stored in the Device Data Proxy.
@@ -66,7 +65,7 @@ type (
 	ModeMqttDelegate struct {
 		dc            *DeviceContext
 		subscriptions map[string]MqttMsgHandler
-		UseTLS        bool
+		useTLS        bool
 
 		receiveQueueSize uint16
 		sendQueueSize    uint16
@@ -90,7 +89,7 @@ var _ MqttDelegate = (*ModeMqttDelegate)(nil)
 
 func WithUseTLS(useTLS bool) func(*ModeMqttDelegate) {
 	return func(d *ModeMqttDelegate) {
-		d.UseTLS = useTLS
+		d.useTLS = useTLS
 	}
 }
 
@@ -131,7 +130,7 @@ func NewModeMqttDelegate(dc *DeviceContext,
 	opts ...ModeMqttDelegateOption) *ModeMqttDelegate {
 	del := &ModeMqttDelegate{
 		dc:               dc,
-		UseTLS:           DefaultUseTLS,
+		useTLS:           DefaultUseTLS,
 		receiveQueueSize: DefaultQueueSize, // some default
 		sendQueueSize:    DefaultQueueSize, // some default
 	}
@@ -189,15 +188,11 @@ func (del *ModeMqttDelegate) runSubscriptionListener() {
 	}
 }
 
-func (del *ModeMqttDelegate) TLSUsageAndConfiguration() (useTLS bool,
-	tlsConfig *tls.Config) {
-	return del.UseTLS, del.dc.TLSConfig
+func (del *ModeMqttDelegate) UseTLS() bool {
+	return del.useTLS
 }
 
 func (del *ModeMqttDelegate) AuthInfo() (username string, password string) {
-	if del.dc.TLSClientAuth {
-		return strconv.FormatUint(del.dc.DeviceID, 10), ""
-	}
 	return strconv.FormatUint(del.dc.DeviceID, 10), del.dc.AuthToken
 }
 
