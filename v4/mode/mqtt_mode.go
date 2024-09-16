@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	DefaultUseTLS    = true
-	DefaultQueueSize = uint16(8)
+	defaultUseTLS    = true
+	defaultQueueSize = uint16(8)
 )
 
 const (
@@ -47,18 +47,24 @@ type (
 		ModificationTime time.Time   `json:"modificationTime"`
 	}
 
+	keyValueUpdate struct {
+		Action string `json:"action"`
+		Key    string `json:"key"`
+		Value  any    `json:"value,omitempty"`
+	}
+
 	// DeviceEvent represents an event to be sent to the MODE cloud.
 	DeviceEvent struct {
 		EventType string                 `json:"eventType"`
 		EventData map[string]interface{} `json:"eventData,omitempty"`
-		Qos       QOSLevel               // not exported to JSON
+		Qos       QOSLevel               `json:"-"` // not exported to JSON
 	}
 
 	// DeviceBulkData represents a batch of opaque data to be sent to the MODE cloud.
 	DeviceBulkData struct {
-		StreamID string
-		Blob     []byte
-		Qos      QOSLevel // not exported to serializer
+		Label string // bulk data label
+		Blob  []byte // payload
+		Qos   QOSLevel
 	}
 
 	// ModeMqttDelegate implements MqttDelegate
@@ -130,9 +136,9 @@ func NewModeMqttDelegate(dc *DeviceContext,
 	opts ...ModeMqttDelegateOption) *ModeMqttDelegate {
 	del := &ModeMqttDelegate{
 		dc:               dc,
-		useTLS:           DefaultUseTLS,
-		receiveQueueSize: DefaultQueueSize, // some default
-		sendQueueSize:    DefaultQueueSize, // some default
+		useTLS:           defaultUseTLS,
+		receiveQueueSize: defaultQueueSize, // some default
+		sendQueueSize:    defaultQueueSize, // some default
 	}
 	subs := make(map[string]MqttMsgHandler)
 	subs[fmt.Sprintf("/devices/%d/command", dc.DeviceID)] = del.handleCommandMsg
@@ -296,9 +302,7 @@ func (client *MqttClient) PublishEvent(ctx context.Context,
 	return client.Publish(ctx, event.Qos, topic, payload)
 }
 
-// PublishBulkData is a helper function to send DeviceBulkData. This replaces both the
-// sendBulkData and writeBulkData methods in the old API (since it does less
-// than both, covering just the intersection)
+// PublishBulkData is a helper function to send DeviceBulkData.
 func (client *MqttClient) PublishBulkData(ctx context.Context,
 	bulkData DeviceBulkData) (uint16,
 	error) {
@@ -308,21 +312,61 @@ func (client *MqttClient) PublishBulkData(ctx context.Context,
 	}
 
 	topic := fmt.Sprintf("/devices/%d/bulkData/%s", modeDel.dc.DeviceID,
-		bulkData.StreamID)
+		bulkData.Label)
 
 	return client.Publish(ctx, bulkData.Qos, topic, bulkData.Blob)
 }
 
-// PublishKeyValueUpdate is a helper function to send a KeyValue update.
-func (client *MqttClient) PublishKeyValueUpdate(ctx context.Context,
-	kvData KeyValueSync) (uint16,
-	error) {
+// PublishDataForRouting is a helper function to send data to the Data Routing system. The data must be properly
+// formatted with metadata required for Data Routing.
+func (client *MqttClient) PublishDataForRouting(ctx context.Context, qos QOSLevel, data []byte) (uint16, error) {
 	modeDel, err := client.GetModeAuthDelegate()
 	if err != nil {
 		return 0, err
 	}
 
-	payload, err := json.Marshal(kvData)
+	topic := fmt.Sprintf("/devices/%d/data", modeDel.dc.DeviceID)
+	return client.Publish(ctx, qos, topic, data)
+}
+
+// SaveKeyValue is a helper function to publish a message that will save a key-value pair to DDP. The message is always
+// sent with QoS1.
+func (client *MqttClient) SaveKeyValue(ctx context.Context, key string, value any) (uint16, error) {
+	modeDel, err := client.GetModeAuthDelegate()
+	if err != nil {
+		return 0, err
+	}
+
+	data := keyValueUpdate{
+		Action: KVSyncActionSet,
+		Key:    key,
+		Value:  value,
+	}
+
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return 0, err
+	}
+	topic := fmt.Sprintf("/devices/%d/kv", modeDel.dc.DeviceID)
+
+	// Hardcode QOS1
+	return client.Publish(ctx, QOSAtLeastOnce, topic, payload)
+}
+
+// DeleteKeyValue is a helper function to publish a message that will delete a key-value pair from DDP. The message is
+// always sent with QoS1.
+func (client *MqttClient) DeleteKeyValue(ctx context.Context, key string) (uint16, error) {
+	modeDel, err := client.GetModeAuthDelegate()
+	if err != nil {
+		return 0, err
+	}
+
+	data := keyValueUpdate{
+		Action: KVSyncActionDelete,
+		Key:    key,
+	}
+
+	payload, err := json.Marshal(data)
 	if err != nil {
 		return 0, err
 	}

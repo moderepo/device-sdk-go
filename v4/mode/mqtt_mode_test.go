@@ -100,13 +100,13 @@ func TestModeMqttDelegate(t *testing.T) {
 
 		useTLS := del.UseTLS()
 		// Default is not to use TLS
-		assert.Equal(t, DefaultUseTLS, useTLS, "Use TLS expected to be true")
+		assert.Equal(t, defaultUseTLS, useTLS, "Use TLS expected to be true")
 		user, password := del.AuthInfo()
 		assert.Equal(t, fmt.Sprintf("%d", dc.DeviceID), user, "User did not match device ID")
 		assert.Equal(t, dc.AuthToken, password, "Password did not match device auth token")
-		assert.Equal(t, del.GetReceiveQueueSize(), DefaultQueueSize,
+		assert.Equal(t, del.GetReceiveQueueSize(), defaultQueueSize,
 			"Receive queue size did not match default")
-		assert.Equal(t, del.GetSendQueueSize(), DefaultQueueSize,
+		assert.Equal(t, del.GetSendQueueSize(), defaultQueueSize,
 			"Receive queue size did not match default")
 
 		// Just the first two subs of the expectedSubs will be found
@@ -263,64 +263,91 @@ func TestModeMqttClientPublishBulkData(t *testing.T) {
 	assert.True(t, client.IsConnected(), "Lost connection")
 
 	bulk := DeviceBulkData{
-		StreamID: "stream1",
-		Blob:     []byte("blob"),
-		Qos:      QOSAtMostOnce,
+		Label: "stream1",
+		Blob:  []byte("blob"),
+		Qos:   QOSAtLeastOnce,
 	}
-	_, err := client.PublishBulkData(ctx, bulk)
+	packetID, err := client.PublishBulkData(ctx, bulk)
 	assert.Nil(t, err, "PublishDeviceBulkData send failed")
 
+	returnID := testModeWaitForPubAck(t, goodDelegate, false)
+	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
+
 	logInfo("[MQTT Test] disconnecting")
-	// From looking at the original session.go, I believe this was QOS0 (no
-	// ACK. So, once we send it, we're done)
 	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
 
 	cancel()
 	wg.Wait()
 }
 
-func TestModeMqttClientPublishKVUpdate(t *testing.T) {
+func TestModeMqttClientPublishDataForRouting(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
 	DummyMQTTD(ctx, &wg, nil)
 
-	fmt.Println("TestMqttClientPublishKVUpdate")
+	fmt.Println("TestMqttClientPublishDataForRouting")
 	goodDelegate := newModeMqttDelegate()
 	client := testModeConnection(ctx, t, goodDelegate, false)
 	assert.True(t, client.IsConnected(), "Lost connection")
 
-	kvData := KeyValueSync{
-		Action: KVSyncActionSet,
-		Key:    "boo99",
-		Value:  "far99",
-	}
-
-	// Set the value
-	packetID, err := client.PublishKeyValueUpdate(ctx, kvData)
-	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
+	packetID, err := client.PublishDataForRouting(ctx, QOSAtLeastOnce, []byte("blob"))
+	assert.Nil(t, err, "PublishDataForRouting send failed")
 
 	returnID := testModeWaitForPubAck(t, goodDelegate, false)
 	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
 
-	// Reload the value
-	kvData.Action = KVSyncActionReload
+	logInfo("[MQTT Test] disconnecting")
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
 
-	packetID, err = client.PublishKeyValueUpdate(ctx, kvData)
-	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
+	cancel()
+	wg.Wait()
+}
 
-	returnID = testModeWaitForPubAck(t, goodDelegate, true)
+func TestModeMqttClientSaveKeyValue(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	DummyMQTTD(ctx, &wg, nil)
+
+	fmt.Println("TestMqttClientSaveKeyValue")
+	goodDelegate := newModeMqttDelegate()
+	client := testModeConnection(ctx, t, goodDelegate, false)
+	assert.True(t, client.IsConnected(), "Lost connection")
+
+	// Set the value
+	packetID, err := client.SaveKeyValue(ctx, "boo99", "far99")
+	assert.Nil(t, err, "SaveKeyValue failed")
+
+	returnID := testModeWaitForPubAck(t, goodDelegate, false)
 	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
+
+	logInfo("[MQTT Test] disconnecting")
+	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
+
+	cancel()
+	wg.Wait()
+}
+
+func TestModeMqttClientDeleteKeyValue(t *testing.T) {
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	DummyMQTTD(ctx, &wg, nil)
+
+	fmt.Println("TestMqttClientDeleteKeyValue")
+	goodDelegate := newModeMqttDelegate()
+	client := testModeConnection(ctx, t, goodDelegate, false)
+	assert.True(t, client.IsConnected(), "Lost connection")
 
 	// Delete the value
-	kvData.Action = KVSyncActionDelete
+	packetID, err := client.DeleteKeyValue(ctx, "boo99")
+	assert.Nil(t, err, "DeleteKeyValue failed")
 
-	packetID, err = client.PublishKeyValueUpdate(ctx, kvData)
-	assert.Nil(t, err, "PublishKeyValueUpdate send failed")
-
-	returnID = testModeWaitForPubAck(t, goodDelegate, true)
+	returnID := testModeWaitForPubAck(t, goodDelegate, true)
 	assert.Equal(t, returnID, packetID, "Send packet did not match Ack packet")
 
+	logInfo("[MQTT Test] disconnecting")
 	assert.Nil(t, client.Disconnect(ctx), "error disconnecting")
 
 	cancel()

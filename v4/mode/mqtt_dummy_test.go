@@ -47,9 +47,9 @@ var (
 
 	currentDevice = "" // XXX - fix the logic that stores this globally
 
-	globalConf DummyConfig
-	packetID   uint32 = 1
-	kvRevision uint32 = 1
+	globalConf     DummyConfig
+	globalPacketID uint32 = 1
+	kvRevision     uint32 = 1
 
 	// DummyServerDelayDuration is the amount of time the server will wait before
 	// responding. This can be used to simulate a slow network
@@ -255,7 +255,7 @@ func parsePacket(client *DummyClient, ty mqttpacket.Type, pktBytes []byte) (pkt 
 		}
 		// Add the topics to the client
 		pkt = &mqttpacket.SubackPacket{
-			PacketID:    uint16(atomic.AddUint32(&packetID, 1)),
+			PacketID:    uint16(atomic.AddUint32(&globalPacketID, 1)),
 			ReturnCodes: []byte{mqttpacket.QOSAtMostOnce, mqttpacket.QOSAtMostOnce}}
 	} else if ty == mqttpacket.UNSUBSCRIBE {
 		inPkt := mqttpacket.NewUnsubscribePacket()
@@ -266,7 +266,7 @@ func parsePacket(client *DummyClient, ty mqttpacket.Type, pktBytes []byte) (pkt 
 			client.removeSubscription(sub)
 		}
 		pkt = &mqttpacket.UnsubackPacket{
-			PacketID: uint16(atomic.AddUint32(&packetID, 1))}
+			PacketID: uint16(atomic.AddUint32(&globalPacketID, 1))}
 	} else if ty == mqttpacket.PINGREQ {
 		pkt = mqttpacket.NewPingrespPacket()
 	} else if ty == mqttpacket.DISCONNECT {
@@ -319,7 +319,7 @@ func packageKVPacket(kvData *KeyValueSync, topic string) mqttpacket.Packet {
 	}
 	kvPkt := mqttpacket.NewPublishPacket()
 	kvPkt.Message = m
-	kvPkt.PacketID = uint16(atomic.AddUint32(&packetID, 1))
+	kvPkt.PacketID = uint16(atomic.AddUint32(&globalPacketID, 1))
 
 	return kvPkt
 }
@@ -345,7 +345,7 @@ func sendPublish(client *DummyClient, pubCmd DummyCmd) {
 				Payload: globalConf.SubData,
 				QOS:     mqttpacket.QOSAtMostOnce,
 			}
-			pubPkt.PacketID = uint16(atomic.AddUint32(&packetID, 1))
+			pubPkt.PacketID = uint16(atomic.AddUint32(&globalPacketID, 1))
 			pkts = append(pkts, pubPkt)
 		}
 		client.subsMtx.RUnlock()
