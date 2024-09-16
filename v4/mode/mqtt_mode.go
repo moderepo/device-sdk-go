@@ -16,6 +16,7 @@ const (
 	defaultQueueSize = uint16(8)
 )
 
+// These are possible values for the KeyValueSync.Action field.
 const (
 	KVSyncActionReload = "reload"
 	KVSyncActionSet    = "set"
@@ -31,13 +32,19 @@ type (
 		payload json.RawMessage
 	}
 
+	// KeyValueSync is a message received from MODE regarding a device's key-value store (DDP).
+	//   - If Action has a value of KVSyncActionReload, the Items field will be populated with all the existing key-value pairs.
+	//   - If Action has a value of KVSyncActionSet, the Key and Value fields will be populated with  a recently saved key-value pair.
+	//   - If Action has a value of KVSyncActionDelete, the Key field will be populated with a recently deleted key.
+	//
+	// In all cases, the Revision field indicates the current revision number of the key-value store.
 	KeyValueSync struct {
 		Action   string      `json:"action"`
 		Revision int         `json:"rev"`
-		Key      string      `json:"key,omitempty"`
-		Value    interface{} `json:"value,omitempty"`
-		NumItems int         `json:"numItems,omitempty"`
-		Items    []*KeyValue `json:"items,omitempty"`
+		Key      string      `json:"key"`
+		Value    interface{} `json:"value"`
+		NumItems int         `json:"numItems"`
+		Items    []*KeyValue `json:"items"`
 	}
 
 	// KeyValue represents a key-value pair stored in the Device Data Proxy.
