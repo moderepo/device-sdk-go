@@ -1,0 +1,45 @@
+name: check v4
+on:
+  workflow_dispatch: # can be triggered manually
+  push:
+    branches:
+      - master
+    paths:
+      - v4/**
+  pull_request:
+    branches:
+      - master
+    paths:
+      - v4/**
+
+jobs:
+  go-vet-and-test:
+    name: Run go vet and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.21.5
+        id: go
+
+      - name: Cache go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key:  v4-go-modules
+          restore-keys: v4-go-modules
+
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v4
+
+      - name: Get dependencies
+        run: |
+          go get -v -t -d ./...
+
+      - name: Run go vet
+        run: |
+          cd v4 ; vet ./... ; cd -
+
+      - name: Run go test
+          cd v4 ; go test ./... ; cd -
