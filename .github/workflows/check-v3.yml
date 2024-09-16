@@ -39,7 +39,7 @@ jobs:
 
     - name: Run go vet
       run: |
-        cd v3 ; vet ./... ; cd -
+        cd v3 ; go vet ./... ; cd -
 
     - name: Run go test
       run: |
