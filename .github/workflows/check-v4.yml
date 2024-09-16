@@ -42,4 +42,5 @@ jobs:
           cd v4 ; vet ./... ; cd -
 
       - name: Run go test
+        run: |
           cd v4 ; go test ./... ; cd -
