@@ -1,4 +1,5 @@
-package mode
+// Package dummymqttd can be used to simulate MODE's MQTT server for testing.
+package dummymqttd
 
 import (
 	"context"
@@ -6,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,14 +38,45 @@ const (
 	ResetServerCmd
 )
 
+type (
+	// KeyValue represents a key-value pair stored in the Device Data Proxy.
+	KeyValue struct {
+		Key              string      `json:"key"`
+		Value            interface{} `json:"value"`
+		ModificationTime time.Time   `json:"modificationTime"`
+	}
+
+	// KeyValueSync is a message received from MODE regarding a device's key-value store (DDP).
+	//   - If Action has a value of KVSyncActionReload, the Items field will be populated with all the existing key-value pairs.
+	//   - If Action has a value of KVSyncActionSet, the Key and Value fields will be populated with  a recently saved key-value pair.
+	//   - If Action has a value of KVSyncActionDelete, the Key field will be populated with a recently deleted key.
+	//
+	// In all cases, the Revision field indicates the current revision number of the key-value store.
+	KeyValueSync struct {
+		Action   string      `json:"action"`
+		Revision int         `json:"rev"`
+		Key      string      `json:"key"`
+		Value    interface{} `json:"value"`
+		NumItems int         `json:"numItems"`
+		Items    []*KeyValue `json:"items"`
+	}
+)
+
+// These are possible values for the KeyValueSync.Action field.
+const (
+	KVSyncActionReload = "reload"
+	KVSyncActionSet    = "set"
+	KVSyncActionDelete = "delete"
+)
+
 var (
 	DefaultMqttHost = "localhost"
 	DefaultMqttPort = 1998
 	DefaultUsers    = []string{"good", "1234"}
 
 	DefaultItems = []*KeyValue{
-		&KeyValue{Key: "key1", Value: "value1", ModificationTime: time.Now()},
-		&KeyValue{Key: "key2", Value: "value2", ModificationTime: time.Now()},
+		{Key: "key1", Value: "value1", ModificationTime: time.Now()},
+		{Key: "key2", Value: "value2", ModificationTime: time.Now()},
 	}
 
 	currentDevice = "" // XXX - fix the logic that stores this globally
@@ -480,7 +514,7 @@ func closeConnections(context *DummyContext) {
 	context.Clients = nil
 }
 
-// DummyMQTTD is dummy MQTT server. It will run an MQTT server as a goroutine. An optional
+// StartDummyMQTTD is dummy MQTT server. It will run an MQTT server as a goroutine. An optional
 // command channel can be passed in to manipulate the server manipulating test
 // conditions and shutting down.
 // Unlike the v2 dummyMQTTD, this starts goroutines but isn't meant to be run as
@@ -488,7 +522,7 @@ func closeConnections(context *DummyContext) {
 //
 // To end the server, either close the command channel or call cancel() on the
 // context.
-func DummyMQTTD(ctx context.Context, wg *sync.WaitGroup,
+func StartDummyMQTTD(ctx context.Context, wg *sync.WaitGroup,
 	cmdCh chan DummyCmd) bool {
 
 	conf := DummyConfig{
@@ -496,10 +530,10 @@ func DummyMQTTD(ctx context.Context, wg *sync.WaitGroup,
 		MqttPort: DefaultMqttPort,
 		Users:    DefaultUsers,
 	}
-	return DummyMQTTDWithConfig(ctx, wg, cmdCh, conf)
+	return StartDummyMQTTDWithConfig(ctx, wg, cmdCh, conf)
 }
 
-func DummyMQTTDWithConfig(ctx context.Context, wg *sync.WaitGroup,
+func StartDummyMQTTDWithConfig(ctx context.Context, wg *sync.WaitGroup,
 	cmdCh chan DummyCmd, conf DummyConfig) bool {
 	globalConf = conf
 	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", conf.MqttHost,
@@ -530,4 +564,17 @@ func DummyMQTTDWithConfig(ctx context.Context, wg *sync.WaitGroup,
 	go runServer(wg, &dCtx, l)
 
 	return true
+}
+
+var (
+	infoLogger  = log.New(os.Stdout, "[MODE - INFO] ", log.LstdFlags)
+	errorLogger = log.New(os.Stderr, "[MODE - ERROR] ", log.LstdFlags)
+)
+
+func logInfo(format string, values ...interface{}) {
+	infoLogger.Printf(format+"\n", values...)
+}
+
+func logError(format string, values ...interface{}) {
+	errorLogger.Printf(format+"\n", values...)
 }

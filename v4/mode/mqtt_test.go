@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moderepo/device-sdk-go/v4/dummymqttd"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -148,7 +149,7 @@ func (del *TestMqttDelegate) createContext() (context.Context, context.CancelFun
 func testConnection(ctx context.Context, t *testing.T, delegate MqttDelegate,
 	expectError bool) *MqttClient {
 
-	client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+	client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 		WithMqttDelegate(delegate))
 	err := client.Connect(ctx)
 	if expectError {
@@ -175,26 +176,26 @@ func TestCreateMqttClient(t *testing.T) {
 
 	t.Run("Incomplete implementations", func(t *testing.T) {
 		var client *MqttClient
-		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client = NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttAuthDelegate(authDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client = NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttReceiverDelegate(recvDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client = NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttConfigDelegate(confDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
-		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client = NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttAuthDelegate(authDel),
 			WithMqttConfigDelegate(confDel))
 		assert.Nil(t, client, "Incomplete delegate implementation succeeded")
 	})
 
 	t.Run("Good combinations", func(t *testing.T) {
-		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttDelegate(allInOne))
 		assert.NotNil(t, client, "Unexpected failure in creating client")
-		client = NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client = NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttAuthDelegate(authDel),
 			WithMqttReceiverDelegate(recvDel),
 			WithMqttConfigDelegate(confDel))
@@ -206,7 +207,7 @@ func TestMqttClientConnection(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	DummyMQTTD(ctx, &wg, nil)
+	dummymqttd.StartDummyMQTTD(ctx, &wg, nil)
 
 	t.Run("Fail to Connect bad user/pass", func(t *testing.T) {
 		badDelegate := invalidTestMqttDelegate()
@@ -226,11 +227,11 @@ func TestMqttClientReconnect(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	DummyMQTTD(ctx, &wg, nil)
+	dummymqttd.StartDummyMQTTD(ctx, &wg, nil)
 	delegate := newTestMqttDelegate()
 
 	t.Run("Connect", func(t *testing.T) {
-		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
@@ -242,7 +243,7 @@ func TestMqttClientReconnect(t *testing.T) {
 	})
 	t.Run("ReConnect", func(t *testing.T) {
 		// recreate the closed channels that were closed on OnClose()
-		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttDelegate(delegate))
 		err := client.Connect(ctx)
 		assert.Nil(t, err, "Failed to connect to client")
@@ -258,7 +259,7 @@ func TestMqttClientSubscribe(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	DummyMQTTD(ctx, &wg, nil)
+	dummymqttd.StartDummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientSubscribe")
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(ctx, t, goodDelegate, false)
@@ -279,7 +280,7 @@ func TestMqttClientUnSubscribe(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
-	DummyMQTTD(ctx, &wg, nil)
+	dummymqttd.StartDummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientUnsubscribe")
 	goodDelegate := newTestMqttDelegate()
 	client := testConnection(ctx, t, goodDelegate, false)
@@ -296,7 +297,7 @@ func TestMqttClientPublish(t *testing.T) {
 	delegate := newTestMqttDelegate()
 	ctx, cancel := delegate.createContext()
 	wg.Add(1)
-	DummyMQTTD(ctx, &wg, nil)
+	dummymqttd.StartDummyMQTTD(ctx, &wg, nil)
 	fmt.Println("TestMqttClientPublish")
 
 	t.Run("Test Publish With ACK", func(t *testing.T) {
@@ -370,13 +371,13 @@ func sendPing(ctx context.Context, client *MqttClient, del *TestMqttDelegate) er
 func TestMqttClientPing(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
-	cmdCh := make(chan DummyCmd)
-	DummyMQTTD(nil, &wg, cmdCh)
+	cmdCh := make(chan dummymqttd.DummyCmd)
+	dummymqttd.StartDummyMQTTD(nil, &wg, cmdCh)
 
 	delegate := newTestMqttDelegate()
 
 	t.Run("Ping with No Connection", func(t *testing.T) {
-		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttDelegate(delegate))
 		ctx, cancel := delegate.createContext()
 		defer cancel()
@@ -410,7 +411,7 @@ func TestMqttClientPing(t *testing.T) {
 		ctx, cancel := delegate.createContext()
 		defer cancel()
 		client := testConnection(ctx, t, delegate, false)
-		cmdCh <- SlowdownServerCmd
+		cmdCh <- dummymqttd.SlowdownServerCmd
 		// Wait for the ack, but it will time out
 		err := sendPing(ctx, client, delegate)
 		assert.Error(t, err, "Received expected error")
@@ -421,7 +422,7 @@ func TestMqttClientPing(t *testing.T) {
 	})
 
 	logInfo("Sending shutdown to server")
-	cmdCh <- ShutdownCmd
+	cmdCh <- dummymqttd.ShutdownCmd
 	wg.Wait()
 }
 
@@ -443,8 +444,8 @@ func waitForCondition(ctx context.Context, timeout time.Duration,
 func TestMqttErrorHandling(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
-	cmdCh := make(chan DummyCmd)
-	DummyMQTTD(nil, &wg, cmdCh)
+	cmdCh := make(chan dummymqttd.DummyCmd)
+	dummymqttd.StartDummyMQTTD(nil, &wg, cmdCh)
 	timeout := 4 * time.Second
 
 	queueSize := uint16(2)
@@ -453,7 +454,7 @@ func TestMqttErrorHandling(t *testing.T) {
 	t.Run("TestNoErrorDelegate", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttDelegate(delegate))
 		assert.Equal(t, len(client.TakeRemainingErrors()), 0,
 			"Unexpected errors in last errors")
@@ -480,7 +481,7 @@ func TestMqttErrorHandling(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		errorDelegate := TestMqttErrorDelegate{errorChBufSize: queueSize}
-		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttDelegate(delegate), WithMqttErrorDelegate(&errorDelegate))
 		assert.Nil(t, client.Connect(ctx), "Failed to connect")
 		// check that our error channel is empty
@@ -511,7 +512,7 @@ func TestMqttErrorHandling(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		errorDelegate := TestMqttErrorDelegate{errorChBufSize: queueSize}
-		client := NewMqttClient(DefaultMqttHost, DefaultMqttPort,
+		client := NewMqttClient(dummymqttd.DefaultMqttHost, dummymqttd.DefaultMqttPort,
 			WithMqttDelegate(delegate), WithMqttErrorDelegate(&errorDelegate))
 		assert.Nil(t, client.Connect(ctx), "Failed to connect")
 		// check that our error channel is empty
@@ -548,6 +549,6 @@ func TestMqttErrorHandling(t *testing.T) {
 	})
 
 	logInfo("Sending shutdown to server")
-	cmdCh <- ShutdownCmd
+	cmdCh <- dummymqttd.ShutdownCmd
 	wg.Wait()
 }
