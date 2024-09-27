@@ -69,10 +69,13 @@ const (
 	KVSyncActionDelete = "delete"
 )
 
-var (
+const (
 	DefaultMqttHost = "localhost"
 	DefaultMqttPort = 1998
-	DefaultUsers    = []string{"good", "1234"}
+)
+
+var (
+	DefaultUsers = []string{"good", "1234"}
 
 	DefaultItems = []*KeyValue{
 		{Key: "key1", Value: "value1", ModificationTime: time.Now()},
@@ -88,6 +91,9 @@ var (
 	// DummyServerDelayDuration is the amount of time the server will wait before
 	// responding. This can be used to simulate a slow network
 	DummyServerDelayDuration = 3 * time.Second
+
+	// ServerContext is initialized by either StartDummyMQTTD or StartDummyMQTTDWithConfig
+	ServerContext *DummyContext
 )
 
 type (
@@ -562,6 +568,7 @@ func StartDummyMQTTDWithConfig(ctx context.Context, wg *sync.WaitGroup,
 
 	wg.Add(1)
 	go runServer(wg, &dCtx, l)
+	ServerContext = &dCtx
 
 	return true
 }
