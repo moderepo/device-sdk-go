@@ -10,7 +10,6 @@ device to use the Device Data Proxy (device key-value store) feature.
 Both incoming commands and outgoing events are queued. If the connection is
 disrupted, commands already in the queue will be processed. Likewise,
 events already in the queue will be delivered when the connection resumes.
-
 */
 package mode
 

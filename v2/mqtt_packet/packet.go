@@ -107,8 +107,8 @@ func PacketID(packet Packet) (uint16, bool) {
 
 // Fuzz is a basic fuzzing test that works with https://github.com/dvyukov/go-fuzz:
 //
-//		$ go-fuzz-build github.com/gomqtt/packet
-//		$ go-fuzz -bin=./packet-fuzz.zip -workdir=./fuzz
+//	$ go-fuzz-build github.com/gomqtt/packet
+//	$ go-fuzz -bin=./packet-fuzz.zip -workdir=./fuzz
 func Fuzz(data []byte) int {
 	// check for zero length data
 	if len(data) == 0 {
